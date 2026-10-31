@@ -31,6 +31,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
 - 鼠标悬停看明细，右键退出。
 - 空间不足时依次省略缓存、Token、`tok/s` 和上下文；连 5h 和 7d 都放不下时隐藏。
+- 拖动或调整 Claude 窗口时小窗会隐藏，停下后恢复。
 - 小窗退出后，下次开始新会话时由插件重新拉起。
 
 ## 卸载

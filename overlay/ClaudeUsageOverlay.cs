@@ -251,7 +251,7 @@ internal sealed class Anchor { public IntPtr Window; public Rectangle Model; pub
 // with the sidebar and panes, so no offset from the window edge is assumed.
 internal sealed class AnchorFinder
 {
-    private AutomationElement _button; private int _leftBound; private IntPtr _window; private DateTime _nextSearch = DateTime.MinValue;
+    private AutomationElement _button; private int _leftGap; private IntPtr _window; private DateTime _nextSearch = DateTime.MinValue;
 
     public Anchor Find()
     {
@@ -264,7 +264,7 @@ internal sealed class AnchorFinder
             if (_button.Current.IsOffscreen) { _button = null; _nextSearch = DateTime.MinValue; return null; }
             var r = _button.Current.BoundingRectangle;
             if (r.IsEmpty || r.Width <= 0) { _button = null; _nextSearch = DateTime.MinValue; return null; }
-            return new Anchor { Window = window, Model = new Rectangle((int)r.X, (int)r.Y, (int)r.Width, (int)r.Height), LeftBound = _leftBound };
+            return new Anchor { Window = window, Model = new Rectangle((int)r.X, (int)r.Y, (int)r.Width, (int)r.Height), LeftBound = (int)r.X - _leftGap };
         }
         catch (ElementNotAvailableException) { _button = null; _nextSearch = DateTime.MinValue; return null; }
     }
@@ -285,7 +285,9 @@ internal sealed class AnchorFinder
         }
         _button = best;
         if (best == null) { _nextSearch = DateTime.UtcNow.AddSeconds(1); return; }
-        var model = best.Current.BoundingRectangle; var centre = model.Y + model.Height / 2; var bound = 0.0;
+        var model = best.Current.BoundingRectangle; var centre = model.Y + model.Height / 2;
+        Native.RECT frame;
+        var bound = Native.GetWindowRect(window, out frame) ? (double)frame.Left : model.Left;
         // Only the button's own row counts: transcript content scrolls behind the same height.
         var row = best;
         for (var depth = 0; depth < 8; depth++)
@@ -303,7 +305,8 @@ internal sealed class AnchorFinder
             if (r.IsEmpty || r.Top > centre || r.Bottom < centre || r.Height > model.Height * 2) continue;
             if (r.Right <= model.Left && r.Right > bound) bound = r.Right;
         }
-        _leftBound = (int)bound;
+        // Kept relative to the button: the search runs seconds apart, the window can move between.
+        _leftGap = (int)(model.Left - bound);
     }
 
     private static IntPtr ClaudeWindow()
@@ -323,7 +326,8 @@ internal sealed class AnchorFinder
 internal sealed class OverlayForm : Form
 {
     private const int GapToModel = 12, GapToLeft = 8, MissesBeforeHide = 4;
-    private const int SampleSeconds = 3;
+    private const int SampleSeconds = 3, SettleMs = 200;
+    private Point _modelOffset; private Size _windowSize; private long _lastMoveTicks; private Native.RECT _lastFrame; private bool _away;
     private int _misses; private string _state; private DateTime _nextSample = DateTime.MinValue;
     private readonly ToolTip _tip = new ToolTip { InitialDelay = 300, AutoPopDelay = 20000, ReshowDelay = 100 };
     private readonly string[] _none = new string[0];
@@ -337,8 +341,52 @@ internal sealed class OverlayForm : Form
         // A closed window must take the overlay with it at once, whatever UI Automation is
         // doing: its calls can stall on a window going away, and misses wait out a grace period.
         var watch = new System.Windows.Forms.Timer { Interval = 150 };
-        watch.Tick += (s, e) => { if (Visible) Apply(); };
+        watch.Tick += (s, e) => { if (Visible || _away) Apply(); };
         watch.Start();
+        var moveWatch = new System.Windows.Forms.Timer { Interval = 30 };
+        moveWatch.Tick += (s, e) => CheckMoved();
+        moveWatch.Start();
+    }
+
+    // Moving a second window with every step of a drag makes the whole drag feel late, so the
+    // overlay steps aside until the window stops. GetWindowRect sends the window no message.
+    private void CheckMoved()
+    {
+        Native.RECT frame;
+        if (_anchor == null || !Native.GetWindowRect(_anchor.Window, out frame)) return;
+        var moved = frame.Left != _lastFrame.Left || frame.Top != _lastFrame.Top || frame.Right != _lastFrame.Right || frame.Bottom != _lastFrame.Bottom;
+        _lastFrame = frame;
+        if (!moved) return;
+        Interlocked.Exchange(ref _lastMoveTicks, DateTime.UtcNow.Ticks);
+        _away = true;
+        if (Visible) Hide();
+    }
+
+    private bool IsResized()
+    {
+        Native.RECT frame;
+        return Native.GetWindowRect(_anchor.Window, out frame) && new Size(frame.Right - frame.Left, frame.Bottom - frame.Top) != _windowSize;
+    }
+
+    public bool IsMoving { get { return (DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastMoveTicks)) / TimeSpan.TicksPerMillisecond < SettleMs; } }
+
+    private Rectangle CurrentModel()
+    {
+        Native.RECT frame;
+        if (_anchor == null || !Native.GetWindowRect(_anchor.Window, out frame)) return Rectangle.Empty;
+        return new Rectangle(frame.Left + _modelOffset.X, frame.Top + _modelOffset.Y, _anchor.Model.Width, _anchor.Model.Height);
+    }
+
+    // A reading taken mid-drag can pair a stale button with the moved window, so while the
+    // window is moving at its own size the offset stays as it was.
+    private void Measure(Anchor anchor)
+    {
+        Native.RECT frame;
+        if (!Native.GetWindowRect(anchor.Window, out frame)) return;
+        var size = new Size(frame.Right - frame.Left, frame.Bottom - frame.Top);
+        if (IsMoving && _anchor != null && _anchor.Window == anchor.Window && size == _windowSize) return;
+        _modelOffset = new Point(anchor.Model.Left - frame.Left, anchor.Model.Top - frame.Top);
+        _windowSize = size;
     }
 
     private static bool IsOnScreen(IntPtr window)
@@ -357,6 +405,7 @@ internal sealed class OverlayForm : Form
     {
         // The button can drop out for a moment while the app redraws; don't blink for that.
         _misses = anchor == null ? _misses + 1 : 0;
+        if (anchor != null) Measure(anchor);
         if (anchor != null || _misses >= MissesBeforeHide) _anchor = anchor;
         Apply();
     }
@@ -400,6 +449,9 @@ internal sealed class OverlayForm : Form
     private void Apply()
     {
         if (_anchor != null && !IsOnScreen(_anchor.Window)) _anchor = null;
+        // A resized window moves the button by an unknown amount: wait for a fresh reading.
+        if (_anchor != null && (IsMoving || IsResized())) { if (Visible) Hide(); return; }
+        _away = false;
         if (_anchor == null || _metrics == null) { Report(_anchor == null ? "hidden: model button not found" : "hidden: no metrics yet"); if (Visible) Hide(); return; }
         var m = _metrics;
         var rate = m.Rate.ToString("0.0", CultureInfo.InvariantCulture) + " tok/s";
@@ -412,12 +464,13 @@ internal sealed class OverlayForm : Form
             string.Join(" | ", new[] { limits, context }),
             limits
         };
-        var model = _anchor.Model;
+        var model = CurrentModel();
+        if (model.IsEmpty) return;
         using (var font = new Font("Microsoft YaHei UI", Math.Max(11f, model.Height * 0.52f), GraphicsUnit.Pixel))
         {
             if (Font.Size != font.Size || Font.Name != font.Name) Font = new Font(font, font.Style);
         }
-        var available = model.Left - GapToModel - (_anchor.LeftBound + GapToLeft);
+        var available = _anchor.Model.Left - GapToModel - (_anchor.LeftBound + GapToLeft);
         string chosen = null; var width = 0;
         foreach (var c in candidates)
         {
@@ -520,8 +573,8 @@ internal static class Program
             var collector = new Collector(projects, Path.Combine(state, "limits.json"));
             var finder = new AnchorFinder();
             Action<Action> post = a => { if (form.IsHandleCreated && !form.IsDisposed) form.BeginInvoke(a); };
-            Loop(2000, () => { var m = collector.Poll(); post(() => form.Update(m)); });
-            Loop(500, () => { var a = finder.Find(); post(() => form.Update(a)); });
+            Loop(2000, () => { if (form.IsMoving) return; var m = collector.Poll(); post(() => form.Update(m)); });
+            Loop(500, () => { if (form.IsMoving) return; var a = finder.Find(); post(() => form.Update(a)); });
             Application.Run();
         }
     }
