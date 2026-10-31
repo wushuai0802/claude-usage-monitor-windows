@@ -23,6 +23,7 @@ internal static class Native
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT rect);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")] public static extern IntPtr SetOwner(IntPtr h, int index, IntPtr owner);
@@ -323,6 +324,16 @@ internal sealed class OverlayForm : Form
         FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
         DoubleBuffered = true; Visible = false; Size = new Size(1, 1);
         var menu = new ContextMenuStrip(); menu.Items.Add("退出用量小窗", null, (s, e) => Application.Exit()); ContextMenuStrip = menu;
+        // A closed window must take the overlay with it at once, whatever UI Automation is
+        // doing: its calls can stall on a window going away, and misses wait out a grace period.
+        var watch = new System.Windows.Forms.Timer { Interval = 150 };
+        watch.Tick += (s, e) => { if (Visible) Apply(); };
+        watch.Start();
+    }
+
+    private static bool IsOnScreen(IntPtr window)
+    {
+        return Native.IsWindow(window) && Native.IsWindowVisible(window) && !Native.IsIconic(window);
     }
 
     protected override bool ShowWithoutActivation { get { return true; } }
@@ -367,6 +378,7 @@ internal sealed class OverlayForm : Form
 
     private void Apply()
     {
+        if (_anchor != null && !IsOnScreen(_anchor.Window)) _anchor = null;
         if (_anchor == null || _metrics == null) { Report(_anchor == null ? "hidden: model button not found" : "hidden: no metrics yet"); if (Visible) Hide(); return; }
         var m = _metrics;
         var rate = m.Rate.ToString("0.0", CultureInfo.InvariantCulture) + " tok/s";
