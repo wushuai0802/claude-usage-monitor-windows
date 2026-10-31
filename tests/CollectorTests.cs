@@ -69,7 +69,14 @@ internal static class CollectorTests
             Equal("no input shows dashes", "--", OverlayForm.CacheRate(new TokenUsage()));
             Equal("context from parent session", 18.0, m.ContextPercent);
             Equal("expired window has no reading", null, m.FiveHour.Used);
+            Equal("expired window says so", "已重置", OverlayForm.Percent(m.FiveHour));
             Equal("live window reading", 22.5, m.SevenDay.Used);
+            Equal("live window shows percent", "23%", OverlayForm.Percent(new Limit { Used = 22.6 }));
+            Equal("no limit reading shows dashes", "--", OverlayForm.Percent(null));
+            Equal("plugin reading wins over tokens", "18%", OverlayForm.ContextText(m));
+            Equal("session tokens ignore the subagent's", 5000L, m.ContextTokens);
+            Equal("no plugin reading shows tokens", "~12万", OverlayForm.ContextText(new Metrics { ContextTokens = 120000 }));
+            Equal("nothing known shows dashes", "--", OverlayForm.ContextText(new Metrics()));
             Equal("rate is output over response time", 10.0, Math.Round(m.Rate, 1));
 
             File.AppendAllText(Path.Combine(subagents, "agent-1.jsonl"), Assistant("m3", now.AddSeconds(6), 1, 0, 0, 1) + "\n");

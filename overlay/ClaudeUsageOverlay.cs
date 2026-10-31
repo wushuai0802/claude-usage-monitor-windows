@@ -34,6 +34,7 @@ internal sealed class TokenUsage { public long Input, CacheWrite, CacheRead, Out
 internal sealed class FileCursor
 {
     public string SessionId;
+    public bool IsSubagent;
     public long Offset;
     public DateTime LastTurnRecord = DateTime.MinValue;
     public string LastMessageId;
@@ -43,11 +44,11 @@ internal sealed class FileCursor
     public bool Finished = true;
 }
 
-internal sealed class Limit { public double? Used; public DateTime? ResetsAt; }
+internal sealed class Limit { public double? Used; public DateTime? ResetsAt; public bool Expired; }
 
 internal sealed class Metrics
 {
-    public double Rate; public TokenUsage Today = new TokenUsage(); public Limit FiveHour, SevenDay; public DateTime? LimitsAt; public double? ContextPercent;
+    public double Rate; public TokenUsage Today = new TokenUsage(); public Limit FiveHour, SevenDay; public DateTime? LimitsAt; public double? ContextPercent; public long? ContextTokens;
 }
 
 // Incremental, read-only scan of today's transcript records.
@@ -57,6 +58,7 @@ internal sealed class Collector
     private readonly string _projects, _limitsPath, _contextDir;
     private readonly Dictionary<string, FileCursor> _files = new Dictionary<string, FileCursor>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, TokenUsage> _messages = new Dictionary<string, TokenUsage>();
+    private readonly Dictionary<string, long> _promptTokens = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
     private readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
     private DateTime _day = DateTime.Today;
 
@@ -78,12 +80,16 @@ internal sealed class Collector
         }
     }
 
+    private static bool IsSubagent(string path)
+    {
+        return string.Equals(Path.GetFileName(Path.GetDirectoryName(path)), "subagents", StringComparison.OrdinalIgnoreCase);
+    }
+
     // A subagent's transcript sits under <session>\subagents; its context is its session's.
     private static string SessionIdOf(string path)
     {
-        var directory = Path.GetDirectoryName(path);
-        return string.Equals(Path.GetFileName(directory), "subagents", StringComparison.OrdinalIgnoreCase)
-            ? Path.GetFileName(Path.GetDirectoryName(directory))
+        return IsSubagent(path)
+            ? Path.GetFileName(Path.GetDirectoryName(Path.GetDirectoryName(path)))
             : Path.GetFileNameWithoutExtension(path);
     }
 
@@ -96,7 +102,7 @@ internal sealed class Collector
             {
                 if (File.GetLastWriteTime(path) < _day) continue;
                 FileCursor cursor;
-                if (!_files.TryGetValue(path, out cursor)) { cursor = new FileCursor { SessionId = SessionIdOf(path) }; _files[path] = cursor; }
+                if (!_files.TryGetValue(path, out cursor)) { cursor = new FileCursor { SessionId = SessionIdOf(path), IsSubagent = IsSubagent(path) }; _files[path] = cursor; }
                 ReadNew(path, cursor);
             }
             catch (IOException) { }
@@ -114,6 +120,8 @@ internal sealed class Collector
             var age = (DateTime.Now - active.LastActivity).TotalSeconds;
             metrics.Rate = (active.Finished ? age <= 5 : age <= 300) ? active.Rate : 0;
             metrics.ContextPercent = ReadContext(active.SessionId);
+            long promptTokens;
+            if (_promptTokens.TryGetValue(active.SessionId, out promptTokens)) metrics.ContextTokens = promptTokens;
         }
         ReadLimits(metrics);
         return metrics;
@@ -168,6 +176,8 @@ internal sealed class Collector
         var tokens = new TokenUsage { Input = Num(usage, "input_tokens"), CacheWrite = Num(usage, "cache_creation_input_tokens"), CacheRead = Num(usage, "cache_read_input_tokens"), Output = Num(usage, "output_tokens") };
         // One response spans several records sharing an id; the latest figures replace earlier ones.
         if (at.Value.Date == _day) _messages[id] = tokens;
+        // What the session sent with its latest response, for a session that has no plugin reading.
+        if (!cursor.IsSubagent) _promptTokens[cursor.SessionId] = tokens.Input + tokens.CacheWrite + tokens.CacheRead;
 
         if (cursor.LastMessageId != id) { cursor.LastMessageId = id; cursor.CurrentStart = cursor.LastTurnRecord; }
         var seconds = (at.Value - cursor.CurrentStart).TotalSeconds;
@@ -214,7 +224,7 @@ internal sealed class Collector
                 object used; if (item.TryGetValue("percentUsed", out used)) limit.Used = Convert.ToDouble(used, CultureInfo.InvariantCulture);
                 object reset; if (item.TryGetValue("resetsAt", out reset)) limit.ResetsAt = ParseTime(reset as string);
                 // A reading from before its window reset says nothing about the new window.
-                if (limit.ResetsAt != null && limit.ResetsAt.Value <= DateTime.Now) limit.Used = null;
+                if (limit.ResetsAt != null && limit.ResetsAt.Value <= DateTime.Now) { limit.Used = null; limit.Expired = true; }
                 var kind = item["kind"] as string;
                 if (kind == "five_hour") metrics.FiveHour = limit; else if (kind == "seven_day") metrics.SevenDay = limit;
             }
@@ -364,7 +374,17 @@ internal sealed class OverlayForm : Form
         if (n >= 10000) return (n / 10000) + "万";
         return n.ToString(CultureInfo.InvariantCulture);
     }
-    private static string Percent(Limit l) { return l == null || l.Used == null ? "--" : Math.Round(l.Used.Value).ToString(CultureInfo.InvariantCulture) + "%"; }
+    internal static string Percent(Limit l)
+    {
+        if (l != null && l.Expired) return "已重置";
+        return l == null || l.Used == null ? "--" : Math.Round(l.Used.Value).ToString(CultureInfo.InvariantCulture) + "%";
+    }
+    // Without a plugin reading the window size is unknown, so the token count stands in for a percentage.
+    internal static string ContextText(Metrics m)
+    {
+        if (m.ContextPercent != null) return Math.Round(m.ContextPercent.Value).ToString(CultureInfo.InvariantCulture) + "%";
+        return m.ContextTokens != null ? "~" + Tokens(m.ContextTokens.Value) : "--";
+    }
     internal static string CacheRate(TokenUsage t)
     {
         var denominator = t.Input + t.CacheWrite + t.CacheRead;
@@ -372,6 +392,7 @@ internal sealed class OverlayForm : Form
     }
     private static string LimitLine(string label, Limit l)
     {
+        if (l != null && l.Expired) return label + "已重置，等待已加载插件的会话完成下一次响应";
         var text = label + "已用 " + Percent(l);
         return l != null && l.ResetsAt != null ? text + "，" + l.ResetsAt.Value.ToString("MM-dd HH:mm") + " 重置" : text;
     }
@@ -383,7 +404,7 @@ internal sealed class OverlayForm : Form
         var m = _metrics;
         var rate = m.Rate.ToString("0.0", CultureInfo.InvariantCulture) + " tok/s";
         var limits = "5h " + Percent(m.FiveHour) + " · 7d " + Percent(m.SevenDay);
-        var context = "上下文 " + (m.ContextPercent == null ? "--" : Math.Round(m.ContextPercent.Value).ToString(CultureInfo.InvariantCulture) + "%");
+        var context = "上下文 " + ContextText(m);
         var candidates = new[] {
             string.Join(" | ", new[] { rate, Tokens(m.Today.Total), CacheRate(m.Today), limits, context }),
             string.Join(" | ", new[] { rate, Tokens(m.Today.Total), limits, context }),
@@ -424,7 +445,7 @@ internal sealed class OverlayForm : Form
             "tok/s：最近活跃会话的估算值（输出 ÷ 该次响应耗时）",
             LimitLine("5 小时窗口", m.FiveHour),
             LimitLine("7 天窗口", m.SevenDay),
-            context + "（最近活跃会话）",
+            context + (m.ContextPercent == null && m.ContextTokens != null ? "（最近活跃会话未加载插件，显示最新请求的 Token 数）" : "（最近活跃会话）"),
             m.LimitsAt == null ? "额度快照：暂无" : "额度快照：" + m.LimitsAt.Value.ToString("HH:mm:ss")
         });
         if (tip != _tipText) { _tipText = tip; _tip.SetToolTip(this, tip); }
