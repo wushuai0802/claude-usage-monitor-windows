@@ -1,0 +1,7 @@
+{
+  "name": "usage-monitor-local",
+  "owner": { "name": "local" },
+  "plugins": [
+    { "name": "usage-monitor", "source": "./plugin/usage-monitor", "description": "Starts the composer usage overlay and feeds it subscription window readings" }
+  ]
+}

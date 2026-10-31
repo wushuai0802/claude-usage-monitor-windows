@@ -1,0 +1,6 @@
+*.exe
+*.exe.new
+*.log
+*.pdb
+.claude-plugin/types/
+plugin/usage-monitor/.claude-plugin/types/

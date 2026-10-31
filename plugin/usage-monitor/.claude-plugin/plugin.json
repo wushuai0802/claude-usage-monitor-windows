@@ -1,0 +1,6 @@
+{
+  "name": "usage-monitor",
+  "version": "0.4.0",
+  "description": "Starts the composer usage overlay and feeds it subscription window readings. Unofficial.",
+  "license": "MIT"
+}
