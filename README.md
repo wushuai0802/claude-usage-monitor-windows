@@ -1,6 +1,6 @@
 # Claude Usage Monitor Windows
 
-> **非官方项目**，与 Anthropic 没有关联，也未获其认可或支持。“Claude”是 Anthropic 的商标，这里仅用于说明适用对象。当前是**预览版**。
+> **非官方项目**，与 Anthropic 没有关联，也未获其认可或支持。“Claude”是 Anthropic 的商标，这里仅用于说明适用对象。
 
 在 Windows 版 Claude 桌面应用 Code 页的输入框下方（模型按钮左侧）显示：
 
