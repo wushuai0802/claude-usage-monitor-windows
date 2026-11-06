@@ -16,6 +16,9 @@ function Find-ClaudeCli {
 }
 
 function Stop-Overlay {
-  Get-Process ClaudeUsageOverlay -ErrorAction SilentlyContinue | Stop-Process -Force -Confirm:$false
+  # Stop only this installation, never a preview or another user's copy.
+  Get-Process ClaudeUsageOverlay -ErrorAction SilentlyContinue | Where-Object {
+    $_.Path -and [string]::Equals($_.Path, $OverlayExe, [StringComparison]::OrdinalIgnoreCase)
+  } | Stop-Process -Force -Confirm:$false
   Start-Sleep -Milliseconds 500
 }

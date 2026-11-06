@@ -2,5 +2,7 @@
 *.exe.new
 *.log
 *.pdb
+work/
+outputs/
 .claude-plugin/types/
 plugin/usage-monitor/.claude-plugin/types/
