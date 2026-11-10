@@ -32,7 +32,7 @@ export const register = on => {
       if (e.changed.includes('rateLimits')) limitsAt = updatedAt
       if (e.changed.includes('context')) contextAt = updatedAt
       const snapshot = {
-        schemaVersion: 2, pluginVersion: '1.1.0', sessionId,
+        schemaVersion: 2, pluginVersion: '1.1.1', sessionId,
         updatedAt, sequence: ++sequence,
         rateLimitsAt: limitsAt,
         rateLimits: e.rateLimits.map(({ kind, percentUsed, resetsAt }) => ({ kind, percentUsed, resetsAt })),

@@ -6,6 +6,7 @@ using System.Web.Script.Serialization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Documents;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Collections.Generic;
@@ -115,6 +116,49 @@ internal static class RegressionTests
             foreach (var scale in new[] { 1.0, 1.25, 1.5, 2.0 }) {
                 var placed = OverlayLayout.Place(100 * scale, 500 * scale, 60 * scale, 200, 24, scale);
                 Equal("scaled right edge", 500 * scale, placed.Right); Equal("scaled width", 200 * scale, placed.Width);
+            }
+            // Geometry captured from Claude 4.23118; all coordinates are relative to its toolbar.
+            var toolbar = new Rect(0, 0, 769, 24);
+            var modelButton = new Rect(534, 0, 102, 24);
+            var nativeControls = new[] { new Rect(10, 0, 92, 24), new Rect(105, 0, 79, 24),
+                new Rect(193, 6, 13, 12), new Rect(213, 4, 40, 16), modelButton, new Rect(639, 0, 91, 24) };
+            var free = OverlayLayout.FreeRange(toolbar, modelButton, nativeControls, 1);
+            Equal("real toolbar uses all available middle space", 269.0, free.Width);
+            Equal("worktree label keeps six-pixel clearance", 259.0, free.Left);
+            Equal("model button keeps six-pixel clearance", 528.0, free.Right);
+            var extra = nativeControls.Concat(new[] { new Rect(480, 0, 24, 24) });
+            Equal("an extra right-hand control remains uncovered", 474.0, OverlayLayout.FreeRange(toolbar, modelButton, extra, 1).Right);
+            var wideLabel = nativeControls.Concat(new[] { new Rect(213, 4, 100, 16) });
+            Equal("growing native label reduces the free range", 209.0, OverlayLayout.FreeRange(toolbar, modelButton, wideLabel, 1).Width);
+            Equal("empty left side uses toolbar boundary", 522.0, OverlayLayout.FreeRange(toolbar, modelButton, new Rect[0], 1).Width);
+            Equal("occupied toolbar has no safe space", true, OverlayLayout.FreeRange(toolbar, modelButton, new[] { new Rect(0, 0, 534, 24) }, 1).IsEmpty);
+            Equal("off-row content does not steal toolbar space", free, OverlayLayout.FreeRange(toolbar, modelButton, nativeControls.Concat(new[] { new Rect(253, -40, 281, 16) }), 1));
+            Equal("oversized overlay is not placed over controls", true, OverlayLayout.Place(100, 199, 0, 100, 20, 1).IsEmpty);
+            Equal("fractional boundary rounding stays inside gap", true, OverlayLayout.Place(100.4, 199.8, 0, 100, 20, 1).IsEmpty);
+            Equal("exact safe pixel width is accepted", 101.0, OverlayLayout.Place(100.4, 199.8, 0, 98, 20, 1).Left);
+            Equal("detail explanatory text still wraps", TextWrapping.Wrap, MonitorUI.Text("explanation", 12, Brushes.Gray).TextWrapping);
+            foreach (var scale in new[] { 1.0, 1.25, 1.5, 2.0 }) {
+                foreach (var value in new[] { "0.0 tok/s  |  5h 24% · 7d 22%  |  上下文 21%", "0.0 tok/s  |  5h 已重置 · 7d 100%  |  上下文 21%" }) {
+                    var measured = MonitorUI.MeasureStrip(value, scale);
+                    var tb = MonitorUI.StripText(value, Brushes.Gray);
+                    var border = new Border { Padding = new Thickness(5, 2, 5, 2), Child = tb, ClipToBounds = true, UseLayoutRounding = true };
+                    TextOptions.SetTextFormattingMode(border, TextFormattingMode.Ideal);
+                    double constrained = measured.Width - 1 / scale;
+                    border.Measure(new Size(constrained, measured.Height));
+                    border.Arrange(new Rect(0, 0, constrained, measured.Height)); border.UpdateLayout();
+                    Equal("one physical pixel does not cause a second line", true, tb.ContentStart.GetLineStartPosition(1) == null);
+                    var glyph = tb.TranslatePoint(tb.ContentStart.GetCharacterRect(LogicalDirection.Forward).TopLeft, border);
+                    Equal("first text line is not cropped vertically", true, glyph.Y >= 0);
+                    Equal("measurement ignores previous window constraints", measured, MonitorUI.MeasureStrip(value, scale));
+                    Equal("measured width includes rounding reserve", true, measured.Width > tb.DesiredSize.Width + 10);
+                }
+                var sample = new Metrics { Rate = 123.4, Today = new TokenUsage { Input = 9999999999, CacheRead = 9999999999, Output = 9999999999 },
+                    FiveHour = new Limit { Expired = true }, SevenDay = new Limit { Used = 100 }, ContextPercent = 99 };
+                foreach (double pixels in new[] { 120.0, 180.0, 269.0, 400.0, 700.0 }) {
+                    Func<string, double> width = keys => MonitorUI.MeasureStrip(string.Join("  |  ", keys.Split(',').Select(k => MetricText.Value(k, sample))), scale).Width;
+                    var selected = new DisplaySettings().Fit(width, pixels / scale);
+                    Equal("long/reset metrics fit their physical range", true, selected.Count == 0 || width(string.Join(",", selected)) * scale <= pixels);
+                }
             }
             Equal("unknown context remains unknown", "--", MetricText.ContextText(new Metrics()));
             Equal("unknown window shows approximate token count", "~12.0万", MetricText.ContextText(new Metrics { ContextTokens = 120000 }));

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.1 — 2026-11-10
+
+- Measure the largest actual gap between composer toolbar controls, with six-DIP clearance on both sides. Re-read cached control bounds as labels and window layout change.
+- Keep the status strip on one line and measure it independently of the previous window width, avoiding wrapped text clipped above and below.
+- Reserve two physical pixels for rounding, recompute on DPI changes, and hide lower-priority metrics when they cannot fit without covering controls.
+- Include geometry and selected metric IDs in local status diagnostics. Add regression coverage for the observed toolbar, extra controls, reset text, narrow widths and scaled layout.
+
 ## 1.1.0 — 2026-11-06
 
 - Transparent WPF status strip with DirectWrite text, a light/dark detail card, saved display selections and narrow-window priorities.

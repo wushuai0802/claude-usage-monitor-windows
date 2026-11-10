@@ -60,6 +60,24 @@ internal static class MonitorUI
     {
         return new TextBlock { Text = text, FontFamily = Font, FontSize = size, Foreground = ink, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap };
     }
+    internal static TextBlock StripText(string value, Brush ink)
+    {
+        var text = Text(value, 12, ink);
+        text.TextWrapping = TextWrapping.NoWrap;
+        text.TextTrimming = TextTrimming.None;
+        text.HorizontalAlignment = HorizontalAlignment.Left;
+        return text;
+    }
+    internal static Size MeasureStrip(string value, double scale)
+    {
+        var text = StripText(value, Brushes.Gray);
+        TextOptions.SetTextFormattingMode(text, TextFormattingMode.Ideal);
+        text.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        // Include the actual border padding and two physical pixels for layout rounding.
+        // This size is independent of the attached window's previous constraints.
+        return new Size(Math.Ceiling((text.DesiredSize.Width + 10) * scale + 2) / scale,
+            Math.Ceiling((text.DesiredSize.Height + 4) * scale) / scale);
+    }
     internal static Button Button(string text, Action action, Brush ink)
     {
         var button = new Button { Content = text, FontFamily = Font, FontSize = 12, Foreground = ink, Background = Brushes.Transparent, BorderThickness = new Thickness(0),
@@ -151,6 +169,9 @@ internal sealed class OverlayController
     private readonly DisplaySettings _settings;
     private PassiveWindow _strip, _detail;
     private Border _stripBorder;
+    private readonly Dictionary<string, Size> _measureCache = new Dictionary<string, Size>();
+    private Size _stripSize;
+    private string[] _shownMetrics = new string[0];
     private volatile Anchor _anchor;
     private volatile Metrics _metrics;
     private bool _detailsOpen, _showSettings, _light = true, _dirty = true, _dismissed;
@@ -197,6 +218,14 @@ internal sealed class OverlayController
         catch (Exception ex) { Program.Note("settings save failed: " + ex.GetType().Name); }
         _dirty = true; _renderSignature = "";
     }
+    private Size Measure(string value, double scale)
+    {
+        var key = scale.ToString("R", CultureInfo.InvariantCulture) + ":" + value;
+        Size size;
+        if (_measureCache.TryGetValue(key, out size)) return size;
+        if (_measureCache.Count >= 128) _measureCache.Clear();
+        size = MonitorUI.MeasureStrip(value, scale); _measureCache[key] = size; return size;
+    }
     private void Hide(string reason)
     {
         _reason = reason;
@@ -226,26 +255,27 @@ internal sealed class OverlayController
         double sx = frame.Left - a.Frame.Left, sy = frame.Top - a.Frame.Top;
         if (now >= _nextColor) { _nextColor = now.AddSeconds(3); bool light = _settings.Theme == "light" || (_settings.Theme != "dark" && Native.IsLight(a.Window, (int)(a.Model.Left + sx - 3), (int)(a.Model.Top + sy + 3), _light)); if (light != _light) { _light = light; _dirty = true; _renderSignature = ""; } }
         if (_settings.Theme == "light" && !_light || _settings.Theme == "dark" && _light) { _light = _settings.Theme == "light"; _dirty = true; _renderSignature = ""; }
-        double available = (a.Right - a.Left) / a.Scale;
+        double available = (Math.Floor(a.Right + sx) - Math.Ceiling(a.Left + sx)) / a.Scale;
         Func<string, double> measure = keys => {
             var text = string.Join("  |  ", keys.Split(',').Where(k => k.Length > 0).Select(k => MetricText.Value(k, m)));
-            return new FormattedText(text, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight, new Typeface(MonitorUI.Font, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal), 12, Brushes.Gray, a.Scale).WidthIncludingTrailingWhitespace + 10;
+            return Measure(text, a.Scale).Width;
         };
         var shown = _settings.Fit(measure, available);
+        _shownMetrics = shown.ToArray();
         // An all-unchecked selection remains reachable for restoring preferences.
         bool settingsOnly = _settings.Selected.Count == 0;
         if (shown.Count == 0 && !settingsOnly) { Hide("no-room"); Report(); return; }
         var textValue = settingsOnly ? "用量设置" : string.Join("  |  ", shown.Select(k => MetricText.Value(k, m)));
-        var signature = textValue + _light;
+        var signature = textValue + _light + a.Scale.ToString("R", CultureInfo.InvariantCulture);
         if (signature != _renderSignature) {
             _renderSignature = signature;
-            _stripBorder.Child = MonitorUI.Text(textValue, 12, MonitorUI.Brush(_light ? "#6E6A63" : "#BDB8AE"));
+            _stripBorder.Child = MonitorUI.StripText(textValue, MonitorUI.Brush(_light ? "#6E6A63" : "#BDB8AE"));
             _stripBorder.ToolTip = "点击查看明细与显示设置\n速率及上下文：最近活跃会话（不代表当前页面）\n额度读数：" + MetricText.Age(m.LimitsAt, DateTime.Now) + (m.Incomplete ? "\n≈ 表示统计正在补读或存在无法计入的记录" : "");
-            _stripBorder.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         }
-        var size = _stripBorder.DesiredSize;
-        var stripBounds = OverlayLayout.Place(a.Left + sx, a.Right + sx, a.Model.Top + sy + (a.Model.Height - size.Height * a.Scale) / 2, size.Width, size.Height, a.Scale);
-        if (stripBounds.Left < frame.Left || stripBounds.Right > frame.Right || stripBounds.Bottom > frame.Bottom) { Hide("outside-host"); Report(); return; }
+        var size = _stripSize = Measure(textValue, a.Scale);
+        var stripBounds = OverlayLayout.Place(a.Left + sx, a.Right + sx, a.Row.Top + sy + (a.Row.Height - size.Height * a.Scale) / 2, size.Width, size.Height, a.Scale);
+        if (stripBounds.IsEmpty) { Hide("no-room"); Report(); return; }
+        if (stripBounds.Left < frame.Left || stripBounds.Right > frame.Right || stripBounds.Top < a.Row.Top + sy || stripBounds.Bottom > a.Row.Bottom + sy || stripBounds.Bottom > frame.Bottom) { Hide("outside-host"); Report(); return; }
         _strip.Width = size.Width; _strip.Height = size.Height; _strip.Place(a.Window, stripBounds); _strip.Reveal(); _reason = "shown";
         if (_detailsOpen) {
             if (_dirty || (now - _lastDetail).TotalSeconds >= 2) {
@@ -270,7 +300,16 @@ internal sealed class OverlayController
     private void Report()
     {
         if (DateTime.UtcNow < _nextReport) return; _nextReport = DateTime.UtcNow.AddSeconds(5);
-        try { JsonData.WriteAtomic(Path.Combine(_state, "status.json"), new { version = Program.Version, state = _reason, visible = _strip != null && _strip.IsVisible, details = _detail != null && _detail.IsVisible, owner = _owner.ToInt64(), theme = _light ? "light" : "dark", pluginVersion = _metrics == null ? null : _metrics.PluginVersion, sessionBinding = "latest-active", at = DateTime.UtcNow.ToString("o") }); }
+        var a = _anchor;
+        try { JsonData.WriteAtomic(Path.Combine(_state, "status.json"), new { version = Program.Version, state = _reason, visible = _strip != null && _strip.IsVisible, details = _detail != null && _detail.IsVisible, owner = _owner.ToInt64(), theme = _light ? "light" : "dark", pluginVersion = _metrics == null ? null : _metrics.PluginVersion, sessionBinding = "latest-active",
+            layout = a == null ? null : new { left = a.Left, right = a.Right, available = a.Right - a.Left, scale = a.Scale,
+                input = Native.RectData(a.Input), model = Native.RectData(a.Model), row = Native.RectData(a.Row),
+                controls = a.Controls.Select(Native.RectData), shown = _shownMetrics,
+                stripWidth = _strip == null ? 0 : _strip.ActualWidth, stripHeight = _strip == null ? 0 : _strip.ActualHeight,
+                contentWidth = _stripBorder == null ? 0 : _stripBorder.ActualWidth, contentHeight = _stripBorder == null ? 0 : _stripBorder.ActualHeight,
+                measuredWidth = _stripSize.Width, measuredHeight = _stripSize.Height,
+                stripScale = _strip == null || _strip.Handle == IntPtr.Zero ? 0 : Native.Scale(_strip.Handle) },
+            at = DateTime.UtcNow.ToString("o") }); }
         catch (IOException) { } catch (UnauthorizedAccessException) { }
     }
 }

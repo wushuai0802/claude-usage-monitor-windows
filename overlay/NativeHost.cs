@@ -38,6 +38,7 @@ internal static class Native
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] internal static extern IntPtr GetLong(IntPtr window, int index);
     [DllImport("user32.dll")] internal static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
     internal static bool Live(IntPtr w) { return w != IntPtr.Zero && IsWindow(w) && IsWindowVisible(w) && !IsIconic(w); }
+    internal static object RectData(Rect r) { return r.IsEmpty ? null : new { left = r.Left, top = r.Top, width = r.Width, height = r.Height }; }
     internal static double Scale(IntPtr w) { try { return Math.Max(1, GetDpiForWindow(w) / 96.0); } catch (EntryPointNotFoundException) { return 1; } }
     internal static HashSet<int> DesktopPids()
     {
@@ -95,23 +96,45 @@ internal sealed class Anchor
     internal double Left, Right, Scale;
     internal bool MenuOpen;
     internal DateTime At;
+    internal Rect Input = Rect.Empty, Row = Rect.Empty;
+    internal Rect[] Controls = new Rect[0];
 }
 internal static class OverlayLayout
 {
-    internal static bool CanPlace(double left, double right, double width) { return width > 0 && right - left >= width; }
+    internal const double ControlGapDip = 6;
+    internal static bool CanPlace(double left, double right, double width) { return width > 0 && Math.Floor(right) - Math.Ceiling(left) >= width; }
+    internal static Rect FreeRange(Rect toolbar, Rect model, IEnumerable<Rect> occupied, double scale)
+    {
+        if (toolbar.IsEmpty || model.IsEmpty || toolbar.Height <= 0 || scale <= 0 || model.Left < toolbar.Left || model.Left > toolbar.Right) return Rect.Empty;
+        double end = Math.Min(toolbar.Right, model.Left), cursor = toolbar.Left, center = model.Top + model.Height / 2, gap = ControlGapDip * scale;
+        var candidates = occupied.Where(r => !r.IsEmpty && r.Width > 0 && r.Height > 0 && r.Top <= center && r.Bottom >= center && r.Left < end && r.Right > toolbar.Left)
+            .OrderBy(r => r.Left).ToArray();
+        Rect best = Rect.Empty;
+        Action<double, double> consider = (left, right) => {
+            left = Math.Ceiling(left + gap); right = Math.Floor(right - gap);
+            if (right > left && (best.IsEmpty || right - left >= best.Width)) best = new Rect(left, toolbar.Top, right - left, toolbar.Height);
+        };
+        foreach (var r in candidates) {
+            double left = Math.Max(toolbar.Left, r.Left), right = Math.Min(end, r.Right);
+            if (left > cursor) consider(cursor, left);
+            cursor = Math.Max(cursor, right);
+        }
+        if (cursor < end) consider(cursor, end);
+        return best;
+    }
     internal static Rect Place(double left, double right, double top, double widthDip, double heightDip, double scale)
     {
         var width = Math.Ceiling(widthDip * scale); var height = Math.Ceiling(heightDip * scale);
-        return new Rect(Math.Max(left, right - width), top, width, height);
+        if (!CanPlace(left, right, width) || height <= 0) return Rect.Empty;
+        return new Rect(Math.Floor(right) - width, Math.Round(top), width, height);
     }
 }
 internal sealed class AnchorFinder
 {
-    private AutomationElement _root, _model, _portal;
+    private AutomationElement _root, _model, _portal, _toolbar, _edit;
     private readonly List<AutomationElement> _row = new List<AutomationElement>();
     private IntPtr _window;
     private DateTime _nextSearch;
-    private double _leftGap;
     internal string Stage = "waiting";
     internal void Invalidate() { _nextSearch = DateTime.MinValue; }
     internal Anchor Find(IntPtr window)
@@ -130,8 +153,14 @@ internal sealed class AnchorFinder
                 menu = popup != null && !popup.Current.IsOffscreen && !popup.Current.BoundingRectangle.IsEmpty;
             }
             double scale = Native.Scale(window);
-            Stage = menu ? "menu-open" : "located";
-            return new Anchor { Window = window, Frame = frame, Model = box, Left = box.Left - _leftGap + 8 * scale, Right = box.Left - 12 * scale, Scale = scale, MenuOpen = menu, At = DateTime.UtcNow };
+            var row = _toolbar.Current.BoundingRectangle;
+            row.Intersect(new Rect(frame.Left, frame.Top, frame.Width, frame.Height));
+            var controls = new List<Rect>();
+            foreach (var e in _row) if (!e.Current.IsOffscreen) controls.Add(e.Current.BoundingRectangle);
+            var free = OverlayLayout.FreeRange(row, box, controls, scale);
+            Stage = menu ? "menu-open" : free.IsEmpty ? "no-room" : "located";
+            return new Anchor { Window = window, Frame = frame, Model = box, Left = free.IsEmpty ? box.Left : free.Left, Right = free.IsEmpty ? box.Left : free.Right,
+                Scale = scale, MenuOpen = menu, At = DateTime.UtcNow, Input = _edit == null ? Rect.Empty : _edit.Current.BoundingRectangle, Row = row, Controls = controls.ToArray() };
         } catch (ElementNotAvailableException) { _model = null; Invalidate(); Stage = "element-rebuilt"; return null; }
         catch (InvalidOperationException) { _model = null; Invalidate(); Stage = "uia-unavailable"; return null; }
     }
@@ -148,7 +177,7 @@ internal sealed class AnchorFinder
     }
     private void Search(IntPtr window)
     {
-        _nextSearch = DateTime.UtcNow.AddSeconds(5); _model = null; _row.Clear();
+        _nextSearch = DateTime.UtcNow.AddSeconds(5); _model = null; _toolbar = null; _edit = null; _row.Clear();
         _root = AutomationElement.FromHandle(window);
         // Cache the popup container; do not traverse the conversation tree on every tick.
         _portal = _root.FindFirst(TreeScope.Descendants, new PropertyCondition(AutomationElement.AutomationIdProperty, "portal-root"));
@@ -167,12 +196,16 @@ internal sealed class AnchorFinder
         }
         if (_model == null) { _nextSearch = DateTime.UtcNow.AddSeconds(1); return; }
         var model = _model.Current.BoundingRectangle; var center = model.Top + model.Height / 2;
+        var inputBox = editBoxes.Where(e => e.Left <= model.Left && e.Bottom <= model.Bottom).OrderByDescending(e => e.Bottom).FirstOrDefault();
+        foreach (AutomationElement e in edits) {
+            if (!e.Current.IsOffscreen && e.Current.BoundingRectangle == inputBox) { _edit = e; break; }
+        }
         var row = _model;
         for (int depth = 0; depth < 8; depth++) {
             var parent = TreeWalker.ControlViewWalker.GetParent(row); if (parent == null) break;
             var r = parent.Current.BoundingRectangle; if (r.IsEmpty || r.Height > model.Height * 2.5) break; row = parent;
         }
-        double left = editBoxes.Where(e => e.Left <= model.Left && e.Bottom <= model.Bottom).OrderByDescending(e => e.Bottom).Select(e => e.Left).DefaultIfEmpty(model.Left).First();
+        _toolbar = row;
         var neighbors = row.FindAll(TreeScope.Descendants, new OrCondition(
             new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
             new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.CheckBox),
@@ -181,8 +214,6 @@ internal sealed class AnchorFinder
             var r = e.Current.BoundingRectangle;
             if (e.Current.IsOffscreen || r.IsEmpty || r.Top > center || r.Bottom < center || r.Height > model.Height * 2.5) continue;
             _row.Add(e);
-            if (r.Right <= model.Left && r.Right > left) left = r.Right;
         }
-        _leftGap = model.Left - left;
     }
 }

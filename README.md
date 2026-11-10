@@ -26,7 +26,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
 - 点击透明状态条展开明细，再点一次或点击“关闭”收起；右键可暂时隐藏或退出。
 - “显示设置”中勾选显示项、调整窄窗口保留优先级、选择自动／浅色／深色配色。
-- 默认显示全部指标；空间不足时按优先级省略，无法容纳时隐藏，不覆盖原生按钮。
+- 默认显示全部指标；每次定位按底栏真实控件边界选择最大的空闲区域，两侧各保留 6 DIP 间距。状态条保持单行，空间不足时按优先级省略，无法容纳时隐藏。
 - 拖动、缩放和可识别的菜单展开时隐藏，停稳或菜单关闭后恢复。点击浮层不会夺走输入焦点。
 - Claude 桌面完全退出后停止扫描并释放文件监视器，再打开后恢复。只保留低频检查，不新增开机启动项。
 - 彻底退出小窗后，下次启动加载了插件的会话会重新拉起它。
@@ -47,7 +47,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
 - 逐行读取用户 .claude/projects 下相关 JSONL。这些文件包含对话内容；采集器只提取用量字段、消息标识和时间戳，不保存或显示内容。
 - UI Automation 读取按钮名称、角色和坐标，用于定位，不导出对话文字。
-- 自有运行目录为 %LOCALAPPDATA%\ClaudeUsageMonitor。包含 bin、用量快照、ui-settings.json、status.json 和限长 overlay.log。升级保留现有设置和读数。
+- 自有运行目录为 %LOCALAPPDATA%\ClaudeUsageMonitor。包含 bin、用量快照、ui-settings.json、status.json 和限长 overlay.log。status.json 同时记录不含界面文字的控件坐标、可用范围和实际浮层尺寸，便于排查裁切或重叠。升级保留现有设置和读数。
 - 新插件在 measurements 下每个会话保留两个交替写入的快照文件；中断写入时保留上一份完整读数。仍兼容旧 limits.json 与 context 读数。
 - 自动配色只采样未被其他窗口遮挡的 Claude 像素；不保存屏幕截图，不再定期抓取整个窗口。
 - 没有网络请求、遥测或凭据读取。预览图仅使用合成数据。
