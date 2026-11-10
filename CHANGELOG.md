@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.3 — 2026-11-10
+
+- Shorten the tooltip, detail card, context menu, installer message and README; keep only status, reading times and caveats that affect how a number is read.
+
 ## 1.1.2 — 2026-11-10
 
 - Observe main-session model requests through turn.step without rewriting chunks, results, models or tool calls, or issuing additional inference requests.
