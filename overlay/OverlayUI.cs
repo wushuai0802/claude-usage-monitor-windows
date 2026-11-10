@@ -94,7 +94,6 @@ internal static class MonitorUI
         var title = Text("用量明细", 15, ink); title.FontWeight = FontWeights.SemiBold; header.Children.Add(title); panel.Children.Add(header);
         panel.Children.Add(new Border { Height = 8 });
         panel.Children.Add(Text("最近活跃会话 · " + MetricText.Age(m.ActivityAt, DateTime.Now), 11, muted));
-        panel.Children.Add(Text("此处不代表正在查看的页面", 10.5, muted));
         panel.Children.Add(new Border { Height = 10 });
         Action<string, string> row = (label, value) => {
             var grid = new Grid { Margin = new Thickness(0, 3, 0, 3) };
@@ -111,26 +110,25 @@ internal static class MonitorUI
                 + " / " + (m.RateDurationMs / 1000.0).ToString("0.00", CultureInfo.InvariantCulture) + " 秒", 10.5, muted));
         }
         row("上下文", MetricText.ContextText(m));
-        panel.Children.Add(Text("上下文读数：" + MetricText.Age(m.ContextAt, DateTime.Now) + (m.ContextPercent == null ? " · ~ 表示请求 Token 数" : ""), 10.5, muted));
+        panel.Children.Add(Text("读数 " + MetricText.Age(m.ContextAt, DateTime.Now) + (m.ContextPercent == null && m.ContextTokens != null ? " · ~ 为请求 Token 数" : ""), 10.5, muted));
         panel.Children.Add(new Border { Height = 1, Background = Brush(light ? "#E9E6E1" : "#48443E"), Margin = new Thickness(0, 12, 0, 10) });
         row("今日 Token", m.Today.Total.ToString("N0", CultureInfo.InvariantCulture));
         row("输入 / 写缓存", MetricText.Tokens(m.Today.Input) + " / " + MetricText.Tokens(m.Today.CacheWrite));
         row("读缓存 / 输出", MetricText.Tokens(m.Today.CacheRead) + " / " + MetricText.Tokens(m.Today.Output));
         row("缓存命中", MetricText.CacheRate(m.Today));
-        panel.Children.Add(Text("含子代理与缓存读取，不代表计费用量", 10.5, muted));
-        if (m.Incomplete) panel.Children.Add(Text("仍在补读，或有记录未能计入", 10.5, Brush(light ? "#9C5C22" : "#E3B781")));
+        panel.Children.Add(Text("含子代理和缓存读取，不等于计费用量", 10.5, muted));
+        if (m.Incomplete) panel.Children.Add(Text("统计不完整：仍在补读或有记录未计入", 10.5, Brush(light ? "#9C5C22" : "#E3B781")));
         panel.Children.Add(new Border { Height = 1, Background = Brush(light ? "#E9E6E1" : "#48443E"), Margin = new Thickness(0, 12, 0, 10) });
         foreach (var item in new[] { new { Label = "5 小时已用", Limit = m.FiveHour }, new { Label = "7 天已用", Limit = m.SevenDay } }) {
             row(item.Label, MetricText.Percent(item.Limit));
-            if (item.Limit != null && item.Limit.ResetsAt != null) panel.Children.Add(Text(item.Limit.Expired ? "已到重置时间，等待新响应确认" : item.Limit.ResetsAt.Value.ToString("MM-dd HH:mm") + " 重置", 10.5, muted));
+            if (item.Limit != null && item.Limit.ResetsAt != null && !item.Limit.Expired) panel.Children.Add(Text(item.Limit.ResetsAt.Value.ToString("MM-dd HH:mm") + " 重置", 10.5, muted));
         }
-        panel.Children.Add(Text("额度读数：" + MetricText.Age(m.LimitsAt, DateTime.Now), 10.5, muted));
-        if (m.SnapshotError) panel.Children.Add(Text("有快照暂不可读，保留最后有效读数", 10.5, muted));
+        panel.Children.Add(Text("读数 " + MetricText.Age(m.LimitsAt, DateTime.Now) + (m.SnapshotError ? " · 部分快照不可读" : ""), 10.5, muted));
         var footer = new DockPanel { Margin = new Thickness(0, 10, 0, 0) };
         var settingsButton = Button(showSettings ? "收起设置" : "显示设置", toggleSettings, ink); DockPanel.SetDock(settingsButton, Dock.Right); footer.Children.Add(settingsButton);
         footer.Children.Add(Text("非官方 · v" + Program.Version, 10.5, muted)); panel.Children.Add(footer);
         if (showSettings) {
-            panel.Children.Add(Text("勾选显示项 · 上方项目优先保留", 11, muted));
+            panel.Children.Add(Text("空间不足时优先保留上方项目", 11, muted));
             foreach (var id in settings.Priority.ToArray()) {
                 var key = id; var r = new DockPanel { Margin = new Thickness(0, 3, 0, 0) };
                 var up = Button("↑", () => { int index = settings.Priority.IndexOf(key); if (index > 0) { settings.Priority.RemoveAt(index); settings.Priority.Insert(index - 1, key); changed(); } }, muted);
@@ -142,7 +140,6 @@ internal static class MonitorUI
                 r.Children.Add(box); panel.Children.Add(r);
             }
             panel.Children.Add(Button("配色：" + (settings.Theme == "auto" ? "自动" : settings.Theme == "light" ? "浅色" : "深色"), () => { settings.Theme = settings.Theme == "auto" ? "light" : settings.Theme == "light" ? "dark" : "auto"; changed(); }, ink));
-            panel.Children.Add(Text("鼠标操作；不会夺走 Claude 输入焦点", 10.5, muted));
         }
         var scroll = new ScrollViewer { Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Focusable = false };
         return new Border {
@@ -168,10 +165,7 @@ internal static class MonitorUI
     {
         var state = m.RateState == "tools" ? "工具执行中" : m.RateState == "waiting" ? "等待响应" : m.RateState == "generating" ? "模型生成中"
             : m.RateState == "interrupted" ? "已中断" : m.RateState == "error" ? "请求失败" : m.RateState == "completed" ? "响应已完成" : "空闲";
-        var source = m.RateSource == "turn.step" ? "插件请求计时" : "日志间隔估算";
-        var display = m.RateAt == null ? "本回合尚无请求样本" : m.Rate > 0 ? "显示最近一次请求均速" : m.LastRate == 0 ? "最近请求输出为 0" : "主栏已归零，最近样本见下";
-        return state + "；" + display
-            + "。包含首 Token 等待，非逐 Token 即时速度。" + source + "。";
+        return state + " · " + (m.RateSource == "turn.step" ? "插件计时" : "日志估算");
     }
 }
 internal sealed class OverlayController
@@ -222,7 +216,7 @@ internal sealed class OverlayController
         Action<string, Action> add = (title, action) => { var item = new MenuItem { Header = title }; item.Click += (s, e) => action(); menu.Items.Add(item); };
         add("展开 / 收起明细", () => { _detailsOpen = !_detailsOpen; _dirty = true; });
         add("暂时隐藏 5 分钟", () => { _pausedUntil = DateTime.UtcNow.AddMinutes(5); Hide("paused"); });
-        add("隐藏本次（下次启动 Claude 恢复）", () => { _dismissed = true; Hide("dismissed"); });
+        add("隐藏到下次启动 Claude",() => { _dismissed = true; Hide("dismissed"); });
         add("退出用量小窗", () => Application.Current.Shutdown());
         _stripBorder.ContextMenu = menu;
     }
@@ -285,10 +279,7 @@ internal sealed class OverlayController
             _renderSignature = signature;
             _stripBorder.Child = MonitorUI.StripText(textValue, MonitorUI.Brush(_light ? "#6E6A63" : "#BDB8AE"));
         }
-        var tip = "点击查看明细与显示设置\n" + MonitorUI.RateDescription(m)
-            + "\n速率及上下文：最近活跃主会话（不代表当前页面）"
-            + (m.RateAt == null ? "" : "\n最近样本：" + m.RateAt.Value.ToString("MM-dd HH:mm:ss"))
-            + "\n额度读数：" + MetricText.Age(m.LimitsAt, DateTime.Now) + (m.Incomplete ? "\n≈ 表示统计正在补读或存在无法计入的记录" : "");
+        var tip = "点击查看明细" + (m.Incomplete ? "\n≈ 统计不完整" : "");
         if (tip != _tipSignature) { _tipSignature = tip; _stripBorder.ToolTip = tip; }
         var size = _stripSize = Measure(textValue, a.Scale);
         var stripBounds = OverlayLayout.Place(a.Left + sx, a.Right + sx, a.Row.Top + sy + (a.Row.Height - size.Height * a.Scale) / 2, size.Width, size.Height, a.Scale);

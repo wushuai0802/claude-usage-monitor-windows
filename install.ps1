@@ -49,4 +49,4 @@ try {
 # Through explorer, so the overlay does not belong to this shell's process tree.
 if (-not $SkipLaunch) { Start-Process explorer.exe -ArgumentList ('"' + $OverlayExe + '"') -WindowStyle Hidden }
 Write-Host "Installed. The plugin reads from $PSScriptRoot, so keep this folder in place."
-Write-Host 'The overlay is updated. Existing sessions may keep their hook until the next normal reload; legacy readings remain supported.'
+Write-Host 'Open Claude sessions keep the previous plugin until they restart.'
