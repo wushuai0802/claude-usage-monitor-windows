@@ -66,7 +66,7 @@ internal static class RegressionTests
                 Equal("new request clears previous rate", 0.0, collector.Poll().Rate);
                 now = now.AddSeconds(2);
                 File.AppendAllText(path, Assistant("tool", now, 30, "tool_use")); collector.Changed(path);
-                m = collector.Poll(); Equal("tool call clears rate", 0.0, m.Rate); Equal("tool call state", "tools", m.RateState);
+                m = collector.Poll(); Equal("tool-bound response preserves its request average", 15.0, m.Rate); Equal("tool call state", "tools", m.RateState);
                 now = now.AddSeconds(2);
                 var line = Encoding.UTF8.GetBytes(User(now) + Assistant("split", now.AddSeconds(1), 9));
                 using (var f = new FileStream(path, FileMode.Append)) f.Write(line, 0, line.Length - 2);
@@ -103,6 +103,55 @@ internal static class RegressionTests
                 File.WriteAllText(path, Assistant("tomorrow", now.AddSeconds(-1), 7)); File.SetLastWriteTime(path, now);
                 m = collector.Poll(); Equal("day rollover resets total", 7L, m.Today.Output);
             }
+            var ratesDir = Path.Combine(state, "rates"); Directory.CreateDirectory(ratesDir);
+            var rateSlot = Path.Combine(ratesDir, "parent.slot0.json");
+            var rateStart = now;
+            var rateSampleAt = rateStart.AddSeconds(4);
+            long rateSequence = 0;
+            Action<string, long> writeRate = (phase, duration) => {
+                rateSequence++;
+                File.WriteAllText(rateSlot, Json(new { schemaVersion = 1, kind = "modelRate", sessionId = "parent", pluginVersion = Program.Version,
+                    updatedAt = now.ToUniversalTime().ToString("o"), turnStartedAt = rateStart.ToUniversalTime().ToString("o"), turnId = "fixture", sequence = rateSequence,
+                    phase = phase, sample = new { outputTokens = 400, durationMs = duration, completedAt = rateSampleAt.ToUniversalTime().ToString("o") }, complete = true }));
+                File.SetLastWriteTime(rateSlot, now.AddMilliseconds(rateSequence));
+            };
+            now = rateStart.AddSeconds(10); writeRate("tools", 4000);
+            var rateReader = new RateSnapshots(state);
+            Func<Metrics> baseRate = () => new Metrics { SessionId = "parent", HumanPromptAt = rateStart, ActivityAt = rateStart, At = now };
+            var rateMetrics = baseRate(); rateReader.Apply(rateMetrics, now);
+            Equal("stream request average survives tool phase", 100.0, rateMetrics.Rate);
+            Equal("stream observer source is explicit", "turn.step", rateMetrics.RateSource);
+            Equal("stream output count is retained", 400L, rateMetrics.RateOutputTokens);
+            Equal("stream duration is retained", 4000L, rateMetrics.RateDurationMs);
+            now = now.AddSeconds(2); writeRate("waiting", 4000); rateMetrics = baseRate(); rateReader.Apply(rateMetrics, now);
+            Equal("next request wait retains the current turn sample", 100.0, rateMetrics.Rate);
+            now = now.AddSeconds(2); writeRate("generating", 4000); rateMetrics = baseRate(); rateReader.Apply(rateMetrics, now);
+            Equal("generation displays the previous completed request average", 100.0, rateMetrics.Rate);
+            now = now.AddSeconds(2); writeRate("completed", 4000); rateMetrics = baseRate(); rateReader.Apply(rateMetrics, now);
+            Equal("terminal main value expires after five seconds", 0.0, rateMetrics.Rate);
+            Equal("expired sample remains available in details", 100.0, rateMetrics.LastRate);
+            var endedNow = now;
+            now = now.AddSeconds(18); rateMetrics = baseRate(); rateReader.Apply(rateMetrics, now);
+            Equal("completed sample stays exact after heartbeat cancellation", 100.0, rateMetrics.LastRate);
+            Equal("completed historical sample does not become a live rate", 0.0, rateMetrics.Rate);
+            Equal("completed historical sample keeps its timing source", "turn.step", rateMetrics.RateSource);
+            now = endedNow;
+            now = now.AddSeconds(1); rateMetrics = baseRate(); rateMetrics.HumanPromptAt = now; rateReader.Apply(rateMetrics, now);
+            Equal("old turn cannot override a newly submitted prompt", 0.0, rateMetrics.Rate);
+            writeRate("waiting", 4000); rateMetrics = baseRate(); rateReader.Apply(rateMetrics, now);
+            now = now.AddSeconds(19); rateMetrics = baseRate(); rateMetrics.Rate = 37; rateReader.Apply(rateMetrics, now);
+            Equal("abandoned heartbeat cannot override transcript fallback", 37.0, rateMetrics.Rate);
+            writeRate("tools", 4000); rateMetrics = baseRate(); rateReader.Apply(rateMetrics, now);
+            Equal("fresh heartbeat can retain an older valid request sample", 100.0, rateMetrics.Rate);
+            File.WriteAllText(rateSlot, "{"); File.SetLastWriteTime(rateSlot, now.AddSeconds(1));
+            rateMetrics = baseRate(); rateReader.Apply(rateMetrics, now);
+            Equal("partial rate write preserves last complete sample", 100.0, rateMetrics.Rate);
+            Equal("partial rate write is reported", true, rateMetrics.SnapshotError);
+            now = now.AddSeconds(2); writeRate("waiting", 0); rateMetrics = baseRate(); rateReader.Apply(rateMetrics, now);
+            Equal("invalid request duration does not create a speed", 0.0, rateMetrics.Rate);
+            now = now.AddSeconds(2); writeRate("interrupted", 4000); rateMetrics = baseRate(); rateReader.Apply(rateMetrics, now);
+            Equal("interrupted turn clears the main value", 0.0, rateMetrics.Rate);
+            Equal("interrupted turn retains a labeled historical sample", 100.0, rateMetrics.LastRate);
             var settingsPath = Path.Combine(state, "ui-settings.json");
             var settings = new DisplaySettings(); settings.Selected.Remove("today"); settings.Save(settingsPath);
             settings.Theme = "dark"; settings.Save(settingsPath);

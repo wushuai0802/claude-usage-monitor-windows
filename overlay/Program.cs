@@ -5,13 +5,13 @@ using System.Reflection;
 using System.Threading;
 using System.Windows;
 
-[assembly: AssemblyVersion("1.1.1.0")]
-[assembly: AssemblyFileVersion("1.1.1.0")]
+[assembly: AssemblyVersion("1.1.2.0")]
+[assembly: AssemblyFileVersion("1.1.2.0")]
 [assembly: AssemblyTitle("Claude Usage Monitor (unofficial)")]
 
 internal static class Program
 {
-    internal const string Version = "1.1.1";
+    internal const string Version = "1.1.2";
     private static string _state;
     private static readonly ManualResetEvent Stop = new ManualResetEvent(false);
     private static volatile bool _desktopAlive;

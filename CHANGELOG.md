@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.2 — 2026-11-10
+
+- Observe main-session model requests through turn.step without rewriting chunks, results, models or tool calls, or issuing additional inference requests.
+- Show the latest completed model request's average output rate, including the initial wait. Retain it through the same turn's tool/wait/generation phases and label the source and phase in details; clear the strip after a finished turn or a new user prompt.
+- Keep valid output from responses ending in tool_use. Log fallback distinguishes tool results from a new human prompt and ignores repeated records of a completed response for timing.
+- Add independent paired timing snapshots, active-turn heartbeats with cancellation, interruption/error handling and stale-observer fallback.
+- Add regression checks for the formerly zero tool-bound response, repeated JSONL records, request timing, heartbeat freshness, stream/result identity, single request execution, content privacy and cancellation.
+
 ## 1.1.1 — 2026-11-10
 
 - Measure the largest actual gap between composer toolbar controls, with six-DIP clearance on both sides. Re-read cached control bounds as labels and window layout change.

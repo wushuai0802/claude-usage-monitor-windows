@@ -25,6 +25,10 @@ internal sealed class Metrics
     public double? ContextPercent;
     public long? ContextTokens;
     public string SessionId, RateState = "idle", PluginVersion;
+    public string RateSource = "jsonl-estimate";
+    public double LastRate;
+    public DateTime? RateAt, HumanPromptAt;
+    public long RateOutputTokens, RateDurationMs;
     public bool SnapshotError, Incomplete;
     public DateTime At;
 }
@@ -57,11 +61,12 @@ internal sealed class SnapshotReader
 {
     private sealed class Entry { public long Length; public DateTime Write; public Dictionary<string, object> Data; public bool Error; }
     private readonly string _root;
+    private readonly int _schemaVersion;
     private readonly Dictionary<string, Entry> _cache = new Dictionary<string, Entry>(StringComparer.OrdinalIgnoreCase);
     private string[] _paths = new string[0];
     private DateTime _nextList;
-    internal SnapshotReader(string root) { _root = root; }
-    private Dictionary<string, object> Read(string path, out bool failed)
+    internal SnapshotReader(string root, int schemaVersion = 2) { _root = root; _schemaVersion = schemaVersion; }
+    internal Dictionary<string, object> Read(string path, out bool failed)
     {
         Entry entry;
         if (!_cache.TryGetValue(path, out entry)) { entry = new Entry(); _cache[path] = entry; }
@@ -75,7 +80,7 @@ internal sealed class SnapshotReader
             using (var reader = new StreamReader(stream, Encoding.UTF8)) data = JsonData.Parse(reader.ReadToEnd());
             if (data == null) throw new InvalidDataException();
             if (path.EndsWith(".slot0.json") || path.EndsWith(".slot1.json")) {
-                if (JsonData.Number(data, "schemaVersion") != 2 || !Equals(JsonData.Get(data, "complete"), true)
+                if (JsonData.Number(data, "schemaVersion") != _schemaVersion || !Equals(JsonData.Get(data, "complete"), true)
                     || JsonData.Time(JsonData.Get(data, "updatedAt")) == null) throw new InvalidDataException();
             }
             entry.Data = data; entry.Write = info.LastWriteTimeUtc; entry.Length = info.Length; entry.Error = false;
@@ -142,10 +147,16 @@ internal sealed class FileCursor : IDisposable
     public bool IsSubagent, SkipLine;
     public long Offset, PromptTokens;
     public DateTime LastActivity, LastTurnRecord, CurrentStart;
+    public DateTime LastHumanPrompt, RateAt;
+    public long RateOutputTokens, RateDurationMs, ResponseOutput;
+    private readonly HashSet<string> _responses = new HashSet<string>();
+    private readonly Queue<string> _responseOrder = new Queue<string>();
     public string LastMessageId, State = "idle";
     public double Rate;
     public readonly MemoryStream Partial = new MemoryStream();
-    public void Reset() { Offset = 0; Partial.SetLength(0); SkipLine = false; Rate = 0; State = "idle"; LastMessageId = null; LastActivity = LastTurnRecord = CurrentStart = DateTime.MinValue; }
+    public bool Seen(string id) { return _responses.Contains(id); }
+    public void Remember(string id) { if (_responses.Add(id)) _responseOrder.Enqueue(id); while (_responseOrder.Count > 256) _responses.Remove(_responseOrder.Dequeue()); }
+    public void Reset() { Offset = 0; Partial.SetLength(0); SkipLine = false; Rate = 0; State = "idle"; LastMessageId = null; LastActivity = LastTurnRecord = CurrentStart = LastHumanPrompt = RateAt = DateTime.MinValue; RateOutputTokens = RateDurationMs = ResponseOutput = 0; _responses.Clear(); _responseOrder.Clear(); }
     public void Dispose() { Partial.Dispose(); }
 }
 internal sealed class Collector : IDisposable
@@ -154,6 +165,7 @@ internal sealed class Collector : IDisposable
     private readonly string _projects;
     private readonly Func<DateTime> _clock;
     private readonly SnapshotReader _snapshots;
+    private readonly RateSnapshots _rates;
     private readonly Dictionary<string, FileCursor> _files = new Dictionary<string, FileCursor>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Counted> _messages = new Dictionary<string, Counted>();
     private readonly ConcurrentDictionary<string, byte> _changed = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
@@ -170,6 +182,7 @@ internal sealed class Collector : IDisposable
     {
         _projects = Path.GetFullPath(projects).TrimEnd(Path.DirectorySeparatorChar);
         _clock = clock; _day = clock().Date; _snapshots = new SnapshotReader(Path.GetDirectoryName(limitsPath));
+        _rates = new RateSnapshots(Path.GetDirectoryName(limitsPath));
         if (watch && Directory.Exists(_projects)) {
             try {
                 _watcher = new FileSystemWatcher(_projects, "*.jsonl") { IncludeSubdirectories = true, NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size };
@@ -226,9 +239,15 @@ internal sealed class Collector : IDisposable
         if (active != null) {
             m.SessionId = active.SessionId; m.ActivityAt = active.LastActivity; m.ContextTokens = active.PromptTokens > 0 ? active.PromptTokens : (long?)null;
             var age = (now - active.LastActivity).TotalSeconds; m.RateState = active.State;
-            m.Rate = age >= 0 && age <= 5 && (active.State == "generating" || active.State == "completed") ? active.Rate : 0;
+            m.LastRate = active.Rate; m.RateAt = active.RateAt == DateTime.MinValue ? (DateTime?)null : active.RateAt;
+            m.RateOutputTokens = active.RateOutputTokens; m.RateDurationMs = active.RateDurationMs;
+            m.HumanPromptAt = active.LastHumanPrompt == DateTime.MinValue ? (DateTime?)null : active.LastHumanPrompt;
+            // This is the latest request's average, retained during the same turn.
+            // The log-only fallback has no heartbeat, so stop retaining after two minutes.
+            m.Rate = age >= 0 && age <= (active.State == "completed" ? 5 : 120) ? active.Rate : 0;
             if (age > 5 && active.State == "completed") m.RateState = "idle";
         }
+        _rates.Apply(m, now);
         _snapshots.Apply(m, now); return m;
     }
     private void ReadNew(string path, FileCursor cursor)
@@ -264,7 +283,13 @@ internal sealed class Collector : IDisposable
         var type = JsonData.Get(record, "type") as string;
         if (type == "user") {
             if (at < cursor.LastActivity) return;
-            cursor.LastTurnRecord = cursor.LastActivity = at.Value; cursor.LastMessageId = null; cursor.CurrentStart = at.Value; cursor.Rate = 0; cursor.State = "waiting"; return;
+            if (Equals(JsonData.Get(record, "isMeta"), true)) return;
+            cursor.LastTurnRecord = cursor.LastActivity = at.Value; cursor.State = "waiting";
+            if (!IsToolResult(record)) {
+                cursor.LastHumanPrompt = at.Value; cursor.Rate = 0; cursor.RateAt = DateTime.MinValue;
+                cursor.RateOutputTokens = cursor.RateDurationMs = 0;
+            }
+            return;
         }
         if (type != "assistant") return;
         var message = JsonData.Map(JsonData.Get(record, "message")); var usage = JsonData.Map(JsonData.Get(message, "usage")); var id = JsonData.Get(message, "id") as string;
@@ -275,15 +300,33 @@ internal sealed class Collector : IDisposable
             if (previous != null) _total.Add(previous.Usage, -1);
             _messages[id] = new Counted { At = at.Value, Usage = tokens }; _total.Add(tokens, 1);
         }
+        bool seen = cursor.Seen(id);
+        // The same response can be recorded again after a tool result. It must not
+        // become a new request or use that tool-result timestamp as its start.
+        if (seen && (cursor.LastMessageId != id || cursor.State != "generating" || tokens.Output <= cursor.ResponseOutput)) return;
+        if (!seen) {
+            cursor.Remember(id);
+            if (at < cursor.LastActivity) return;
+            cursor.LastMessageId = id; cursor.CurrentStart = cursor.LastTurnRecord; cursor.ResponseOutput = 0;
+        }
         if (at < cursor.LastActivity) return;
         cursor.PromptTokens = tokens.Input + tokens.CacheWrite + tokens.CacheRead;
-        if (cursor.LastMessageId != id) { cursor.LastMessageId = id; cursor.CurrentStart = cursor.LastTurnRecord; }
         double seconds = (at.Value - cursor.CurrentStart).TotalSeconds;
-        cursor.Rate = cursor.CurrentStart != DateTime.MinValue && seconds >= 0.5 ? tokens.Output / seconds : 0;
-        cursor.LastActivity = cursor.LastTurnRecord = at.Value;
+        if (cursor.CurrentStart != DateTime.MinValue && seconds >= 0.5 && tokens.Output > 0) {
+            cursor.Rate = tokens.Output / seconds; cursor.RateAt = at.Value;
+            cursor.RateOutputTokens = tokens.Output; cursor.RateDurationMs = (long)Math.Round(seconds * 1000);
+        }
+        cursor.ResponseOutput = tokens.Output; cursor.LastActivity = at.Value;
         var stop = JsonData.Get(message, "stop_reason") as string;
         cursor.State = stop == "tool_use" ? "tools" : stop != null ? "completed" : "generating";
-        if (cursor.State == "tools") cursor.Rate = 0;
+    }
+    private static bool IsToolResult(Dictionary<string, object> record)
+    {
+        var message = JsonData.Map(JsonData.Get(record, "message"));
+        var content = JsonData.Get(message, "content") as System.Collections.IEnumerable;
+        if (content == null || content is string) return false;
+        foreach (var block in content) if (Equals(JsonData.Get(JsonData.Map(block), "type"), "tool_result")) return true;
+        return false;
     }
     public void Dispose() { if (_watcher != null) _watcher.Dispose(); foreach (var f in _files.Values) f.Dispose(); }
 }

@@ -103,9 +103,13 @@ internal static class MonitorUI
             grid.Children.Add(Text(label, 12, muted));
             var number = Text(value, 12, ink); number.FontWeight = FontWeights.SemiBold; Grid.SetColumn(number, 1); grid.Children.Add(number); panel.Children.Add(grid);
         };
-        row("输出速率 · 估算", MetricText.Value("rate", m));
-        var state = m.RateState == "tools" ? "工具执行中" : m.RateState == "waiting" ? "等待响应" : m.RateState == "generating" ? "最近一次生成采样" : m.RateState == "completed" ? "最近完成的响应" : "空闲";
-        panel.Children.Add(Text(state + "；耗时包含首 Token 等待", 10.5, muted));
+        row("最近请求均速", MetricText.Value("rate", m));
+        panel.Children.Add(Text(RateDescription(m), 10.5, muted));
+        if (m.RateAt != null) {
+            row("最近有效样本", m.LastRate.ToString("0.0", CultureInfo.InvariantCulture) + " tok/s");
+            panel.Children.Add(Text(m.RateAt.Value.ToString("MM-dd HH:mm:ss") + " · 输出 " + MetricText.Tokens(m.RateOutputTokens)
+                + " / " + (m.RateDurationMs / 1000.0).ToString("0.00", CultureInfo.InvariantCulture) + " 秒", 10.5, muted));
+        }
         row("上下文", MetricText.ContextText(m));
         panel.Children.Add(Text("上下文读数：" + MetricText.Age(m.ContextAt, DateTime.Now) + (m.ContextPercent == null ? " · ~ 表示请求 Token 数" : ""), 10.5, muted));
         panel.Children.Add(new Border { Height = 1, Background = Brush(light ? "#E9E6E1" : "#48443E"), Margin = new Thickness(0, 12, 0, 10) });
@@ -160,6 +164,15 @@ internal static class MonitorUI
             using (var file = File.Create(Path.Combine(directory, light ? "detail-light.png" : "detail-dark.png"))) encoder.Save(file);
         }
     }
+    internal static string RateDescription(Metrics m)
+    {
+        var state = m.RateState == "tools" ? "工具执行中" : m.RateState == "waiting" ? "等待响应" : m.RateState == "generating" ? "模型生成中"
+            : m.RateState == "interrupted" ? "已中断" : m.RateState == "error" ? "请求失败" : m.RateState == "completed" ? "响应已完成" : "空闲";
+        var source = m.RateSource == "turn.step" ? "插件请求计时" : "日志间隔估算";
+        var display = m.RateAt == null ? "本回合尚无请求样本" : m.Rate > 0 ? "显示最近一次请求均速" : m.LastRate == 0 ? "最近请求输出为 0" : "主栏已归零，最近样本见下";
+        return state + "；" + display
+            + "。包含首 Token 等待，非逐 Token 即时速度。" + source + "。";
+    }
 }
 internal sealed class OverlayController
 {
@@ -180,6 +193,7 @@ internal sealed class OverlayController
     private long _motionAt;
     private DateTime _nextColor, _nextReport, _lastDetail, _pausedUntil, _nextRender;
     private string _signature = "", _renderSignature = "", _reason = "starting";
+    private string _tipSignature = "";
     internal bool IsMoving { get { return (DateTime.UtcNow.Ticks - Interlocked.Read(ref _motionAt)) / TimeSpan.TicksPerMillisecond < 200; } }
     internal OverlayController(string state)
     {
@@ -270,8 +284,12 @@ internal sealed class OverlayController
         if (signature != _renderSignature) {
             _renderSignature = signature;
             _stripBorder.Child = MonitorUI.StripText(textValue, MonitorUI.Brush(_light ? "#6E6A63" : "#BDB8AE"));
-            _stripBorder.ToolTip = "点击查看明细与显示设置\n速率及上下文：最近活跃会话（不代表当前页面）\n额度读数：" + MetricText.Age(m.LimitsAt, DateTime.Now) + (m.Incomplete ? "\n≈ 表示统计正在补读或存在无法计入的记录" : "");
         }
+        var tip = "点击查看明细与显示设置\n" + MonitorUI.RateDescription(m)
+            + "\n速率及上下文：最近活跃主会话（不代表当前页面）"
+            + (m.RateAt == null ? "" : "\n最近样本：" + m.RateAt.Value.ToString("MM-dd HH:mm:ss"))
+            + "\n额度读数：" + MetricText.Age(m.LimitsAt, DateTime.Now) + (m.Incomplete ? "\n≈ 表示统计正在补读或存在无法计入的记录" : "");
+        if (tip != _tipSignature) { _tipSignature = tip; _stripBorder.ToolTip = tip; }
         var size = _stripSize = Measure(textValue, a.Scale);
         var stripBounds = OverlayLayout.Place(a.Left + sx, a.Right + sx, a.Row.Top + sy + (a.Row.Height - size.Height * a.Scale) / 2, size.Width, size.Height, a.Scale);
         if (stripBounds.IsEmpty) { Hide("no-room"); Report(); return; }
@@ -302,6 +320,8 @@ internal sealed class OverlayController
         if (DateTime.UtcNow < _nextReport) return; _nextReport = DateTime.UtcNow.AddSeconds(5);
         var a = _anchor;
         try { JsonData.WriteAtomic(Path.Combine(_state, "status.json"), new { version = Program.Version, state = _reason, visible = _strip != null && _strip.IsVisible, details = _detail != null && _detail.IsVisible, owner = _owner.ToInt64(), theme = _light ? "light" : "dark", pluginVersion = _metrics == null ? null : _metrics.PluginVersion, sessionBinding = "latest-active",
+            rate = _metrics == null ? null : new { value = _metrics.Rate, last = _metrics.LastRate, phase = _metrics.RateState, source = _metrics.RateSource,
+                sampledAt = _metrics.RateAt == null ? null : _metrics.RateAt.Value.ToUniversalTime().ToString("o"), outputTokens = _metrics.RateOutputTokens, durationMs = _metrics.RateDurationMs },
             layout = a == null ? null : new { left = a.Left, right = a.Right, available = a.Right - a.Left, scale = a.Scale,
                 input = Native.RectData(a.Input), model = Native.RectData(a.Model), row = Native.RectData(a.Row),
                 controls = a.Controls.Select(Native.RectData), shown = _shownMetrics,
