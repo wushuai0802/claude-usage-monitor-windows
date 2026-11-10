@@ -18,7 +18,7 @@ internal sealed class TokenUsage
 internal sealed class Limit { public double? Used; public DateTime? ResetsAt; public bool Expired; }
 internal sealed class Metrics
 {
-    public double Rate;
+    public double Rate, DisplayRate;
     public TokenUsage Today = new TokenUsage();
     public Limit FiveHour, SevenDay;
     public DateTime? LimitsAt, ContextAt, ActivityAt;
@@ -166,6 +166,7 @@ internal sealed class Collector : IDisposable
     private readonly Func<DateTime> _clock;
     private readonly SnapshotReader _snapshots;
     private readonly RateSnapshots _rates;
+    private double _heldRate;
     private readonly Dictionary<string, FileCursor> _files = new Dictionary<string, FileCursor>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Counted> _messages = new Dictionary<string, Counted>();
     private readonly ConcurrentDictionary<string, byte> _changed = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
@@ -248,7 +249,10 @@ internal sealed class Collector : IDisposable
             if (age > 5 && active.State == "completed") m.RateState = "idle";
         }
         _rates.Apply(m, now);
-        _snapshots.Apply(m, now); return m;
+        _snapshots.Apply(m, now);
+        // The strip keeps the latest valid request average instead of dropping to 0 between turns.
+        if (m.Rate > 0) _heldRate = m.Rate;
+        m.DisplayRate = _heldRate; return m;
     }
     private void ReadNew(string path, FileCursor cursor)
     {
@@ -370,7 +374,7 @@ internal static class MetricText
     internal static string Value(string key, Metrics m)
     {
         switch (key) {
-            case "rate": return m.Rate.ToString("0.0", CultureInfo.InvariantCulture) + " tok/s";
+            case "rate": return m.DisplayRate.ToString("0.0", CultureInfo.InvariantCulture) + " tok/s";
             case "today": return (m.Incomplete ? "≈" : "") + Tokens(m.Today.Total);
             case "cache": return CacheRate(m.Today);
             case "limits": return "5h " + Percent(m.FiveHour) + " · 7d " + Percent(m.SevenDay);
