@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.4 — 2026-11-11
+
+- Keep the last request average in the strip between turns instead of dropping to 0 tok/s five seconds after a turn ends or while a new turn waits for its first response.
+
 ## 1.1.3 — 2026-11-10
 
 - Shorten the tooltip, detail card, context menu, installer message and README; keep only status, reading times and caveats that affect how a number is read.
