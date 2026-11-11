@@ -42,6 +42,6 @@ assert.deepEqual([...files.entries()], before, 'session id cannot escape the sna
 await Promise.all(Array.from({ length: 8 }, () => hooks['session.measure']($, event, next)))
 const values = [...files.values()].map(JSON.parse).sort((a, b) => a.sequence - b.sequence)
 assert.equal(values[1].sequence - values[0].sequence, 1, 'concurrent hooks serialize their writes')
-assert.equal(values[1].pluginVersion, '1.1.4')
+assert.equal(values[1].pluginVersion, '1.1.5')
 assert.equal(values[1].sessionId, 'session-a')
 console.log('PASS: hook error isolation, slot recovery, compaction, path validation and concurrent writes.')

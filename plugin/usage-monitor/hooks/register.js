@@ -10,7 +10,7 @@ const persistRate = async ($, state) => {
     const current = state.rate.snapshot(at)
     if (!current) return
     const sequence = ++state.sequence
-    const snapshot = { schemaVersion: 1, kind: 'modelRate', pluginVersion: '1.1.4', sessionId,
+    const snapshot = { schemaVersion: 1, kind: 'modelRate', pluginVersion: '1.1.5', sessionId,
       updatedAt: new Date(at).toISOString(), sequence, ...current, complete: true }
     const path = root + '\\ClaudeUsageMonitor\\rates\\' + sessionId + '.slot' + (sequence % 2) + '.json'
     state.writes = state.writes.catch(() => undefined).then(() => $.fs.write(path, JSON.stringify(snapshot)))
@@ -56,7 +56,7 @@ export const register = on => {
       if (e.changed.includes('rateLimits')) limitsAt = updatedAt
       if (e.changed.includes('context')) contextAt = updatedAt
       const snapshot = {
-        schemaVersion: 2, pluginVersion: '1.1.4', sessionId,
+        schemaVersion: 2, pluginVersion: '1.1.5', sessionId,
         updatedAt, sequence: ++sequence,
         rateLimitsAt: limitsAt,
         rateLimits: e.rateLimits.map(({ kind, percentUsed, resetsAt }) => ({ kind, percentUsed, resetsAt })),

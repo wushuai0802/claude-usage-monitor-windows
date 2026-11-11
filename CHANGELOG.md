@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.5 — 2026-11-11
+
+- Show `-- tok/s` when no turn is running; during a turn the strip still keeps the last request average.
+- Close the detail card when any mouse button is pressed outside the card and the strip, without taking focus from Claude.
+
 ## 1.1.4 — 2026-11-11
 
 - Keep the last request average in the strip between turns instead of dropping to 0 tok/s five seconds after a turn ends or while a new turn waits for its first response.
