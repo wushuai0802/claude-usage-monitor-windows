@@ -27,6 +27,8 @@ internal static class Native
     [DllImport("user32.dll")] internal static extern bool IsIconic(IntPtr window);
     [DllImport("user32.dll")] internal static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] internal static extern IntPtr GetAncestor(IntPtr window, uint flags);
+    [DllImport("user32.dll")] internal static extern bool GetCursorPos(out POINT point);
+    [DllImport("user32.dll")] internal static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] internal static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll")] internal static extern IntPtr GetDC(IntPtr window);
     [DllImport("user32.dll")] internal static extern int ReleaseDC(IntPtr window, IntPtr dc);

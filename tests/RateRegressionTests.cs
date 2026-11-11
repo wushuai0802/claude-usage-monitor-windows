@@ -36,9 +36,9 @@ internal static class RateRegressionTests
                 m = collector.Poll();
                 Equal("next response excludes the preceding tool wait", 20.0, m.Rate);
                 Equal("duplicate response contributes tokens once", 110L, m.Today.Output);
-                now = start.AddSeconds(40); m = collector.Poll(); Equal("finished turn expires as a live rate", 0.0, m.Rate); Equal("strip keeps the last request average", 20.0, m.DisplayRate);
+                now = start.AddSeconds(40); m = collector.Poll(); Equal("finished turn expires as a live rate", 0.0, m.Rate); Equal("idle strip shows no rate", true, m.DisplayRate == null); Equal("idle strip text", "-- tok/s", MetricText.Value("rate", m));
                 now = start.AddSeconds(41); File.AppendAllText(path, Human(now)); collector.Changed(path);
-                m = collector.Poll(); Equal("new human turn clears the live sample", 0.0, m.Rate); Equal("strip keeps the last average while waiting", 20.0, m.DisplayRate);
+                m = collector.Poll(); Equal("new human turn clears the live sample", 0.0, m.Rate); Equal("strip keeps the last average while a turn waits", 20.0, m.DisplayRate.Value);
                 now = start.AddSeconds(44); File.AppendAllText(path, Assistant("request-3", now, 0, null)); collector.Changed(path); collector.Poll();
                 now = start.AddSeconds(46); File.AppendAllText(path, Assistant("request-3", now, 50, "end_turn")); collector.Changed(path);
                 Equal("partial response can acquire its final output count", 10.0, collector.Poll().Rate);

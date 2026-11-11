@@ -181,7 +181,7 @@ internal sealed class OverlayController
     private string[] _shownMetrics = new string[0];
     private volatile Anchor _anchor;
     private volatile Metrics _metrics;
-    private bool _detailsOpen, _showSettings, _light = true, _dirty = true, _dismissed;
+    private bool _detailsOpen, _showSettings, _light = true, _dirty = true, _dismissed, _mouseWasDown;
     private Native.RECT _lastFrame;
     private IntPtr _owner;
     private long _motionAt;
@@ -245,9 +245,21 @@ internal sealed class OverlayController
         if (_strip != null) _strip.Close(); if (_detail != null) _detail.Close();
         _strip = _detail = null; _stripBorder = null; _owner = IntPtr.Zero; _detailsOpen = false; _renderSignature = "";
     }
+    // Polls the mouse buttons so the card closes on a click elsewhere without taking focus from Claude.
+    private bool ClickedOutside()
+    {
+        bool down = Native.GetAsyncKeyState(0x01) < 0 || Native.GetAsyncKeyState(0x02) < 0 || Native.GetAsyncKeyState(0x04) < 0;
+        bool pressed = down && !_mouseWasDown; _mouseWasDown = down;
+        if (!pressed || !_detailsOpen || _detail == null || !_detail.IsVisible) return false;
+        if (_stripBorder != null && _stripBorder.ContextMenu != null && _stripBorder.ContextMenu.IsOpen) return false;
+        Native.POINT p; if (!Native.GetCursorPos(out p)) return false;
+        var hit = Native.GetAncestor(Native.WindowFromPoint(p), 2);
+        return hit != _detail.Handle && (_strip == null || hit != _strip.Handle);
+    }
     private void Tick()
     {
         var now = DateTime.UtcNow; var a = _anchor; var m = _metrics;
+        if (ClickedOutside()) { _detailsOpen = false; _showSettings = false; _dirty = true; _detail.Hide(); }
         if (a == null || !Native.Live(a.Window)) { Hide(_signature.Length == 0 ? "standby" : "host-hidden"); SetInterval(400); Report(); return; }
         Native.RECT frame; Native.GetWindowRect(a.Window, out frame);
         if (_owner != a.Window) { Hide("owner-changed"); _owner = a.Window; _lastFrame = frame; _nextColor = DateTime.MinValue; _detailsOpen = false; }

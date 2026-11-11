@@ -18,7 +18,8 @@ internal sealed class TokenUsage
 internal sealed class Limit { public double? Used; public DateTime? ResetsAt; public bool Expired; }
 internal sealed class Metrics
 {
-    public double Rate, DisplayRate;
+    public double Rate;
+    public double? DisplayRate;
     public TokenUsage Today = new TokenUsage();
     public Limit FiveHour, SevenDay;
     public DateTime? LimitsAt, ContextAt, ActivityAt;
@@ -250,9 +251,11 @@ internal sealed class Collector : IDisposable
         }
         _rates.Apply(m, now);
         _snapshots.Apply(m, now);
-        // The strip keeps the latest valid request average instead of dropping to 0 between turns.
+        // During a turn the strip keeps the latest valid request average; when idle it shows "--".
         if (m.Rate > 0) _heldRate = m.Rate;
-        m.DisplayRate = _heldRate; return m;
+        bool turnActive = (m.RateState == "waiting" || m.RateState == "generating" || m.RateState == "tools")
+            && m.ActivityAt != null && (now - m.ActivityAt.Value).TotalSeconds <= 120;
+        m.DisplayRate = m.Rate > 0 ? m.Rate : turnActive && _heldRate > 0 ? _heldRate : (double?)null; return m;
     }
     private void ReadNew(string path, FileCursor cursor)
     {
@@ -374,7 +377,7 @@ internal static class MetricText
     internal static string Value(string key, Metrics m)
     {
         switch (key) {
-            case "rate": return m.DisplayRate.ToString("0.0", CultureInfo.InvariantCulture) + " tok/s";
+            case "rate": return m.DisplayRate == null ? "-- tok/s" : m.DisplayRate.Value.ToString("0.0", CultureInfo.InvariantCulture) + " tok/s";
             case "today": return (m.Incomplete ? "≈" : "") + Tokens(m.Today.Total);
             case "cache": return CacheRate(m.Today);
             case "limits": return "5h " + Percent(m.FiveHour) + " · 7d " + Percent(m.SevenDay);
