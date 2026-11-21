@@ -1,1 +1,18 @@
-{ "modules": ["./register.js"] }
+{
+  "modules": ["./register.js"],
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe",
+            "args": ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "${CLAUDE_PLUGIN_ROOT}/hooks/start-overlay.ps1"],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

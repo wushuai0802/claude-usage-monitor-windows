@@ -73,12 +73,19 @@ internal static class Program
             });
             Worker(() => {
                 Collector collector = null;
+                var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                var vm2api = new Vm2ApiQuota(_state, profile, localAppData);
                 try {
                     while (!Stop.WaitOne(0)) {
                         if (!_desktopAlive) { if (collector != null) { collector.Dispose(); collector = null; } Stop.WaitOne(2000); continue; }
                         try {
-                            if (collector == null) collector = new Collector(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "projects"), Path.Combine(_state, "limits.json"));
-                            controller.PostMetrics(collector.Poll());
+                            if (collector == null) collector = new Collector(
+                                Path.Combine(profile, ".claude", "projects"), Path.Combine(_state, "limits.json"),
+                                Path.Combine(localAppData, "Claude-3p", "local-agent-mode-sessions"));
+                            var metrics = collector.Poll();
+                            vm2api.Apply(metrics);
+                            controller.PostMetrics(metrics);
                         } catch (Exception ex) { Note("collecting: " + ex.GetType().Name); }
                         Stop.WaitOne(1000);
                     }

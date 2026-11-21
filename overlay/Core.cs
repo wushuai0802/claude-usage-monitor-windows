@@ -25,12 +25,12 @@ internal sealed class Metrics
     public DateTime? LimitsAt, ContextAt, ActivityAt;
     public double? ContextPercent;
     public long? ContextTokens;
-    public string SessionId, RateState = "idle", PluginVersion;
+    public string SessionId, RateState = "idle", PluginVersion, LimitSource;
     public string RateSource = "jsonl-estimate";
     public double LastRate;
     public DateTime? RateAt, HumanPromptAt;
     public long RateOutputTokens, RateDurationMs;
-    public bool SnapshotError, Incomplete;
+    public bool SnapshotError, Incomplete, ThirdParty;
     public DateTime At;
 }
 internal static class JsonData
@@ -99,8 +99,11 @@ internal sealed class SnapshotReader
             try { _paths = Directory.Exists(folder) ? Directory.GetFiles(folder, "*.json") : new string[0]; } catch (IOException) { } catch (UnauthorizedAccessException) { }
         }
         bool failed;
-        var legacy = Read(Path.Combine(_root, "limits.json"), out failed);
-        m.SnapshotError |= failed;
+        Dictionary<string, object> legacy = null;
+        if (!m.ThirdParty) {
+            legacy = Read(Path.Combine(_root, "limits.json"), out failed);
+            m.SnapshotError |= failed;
+        }
         var limitsAt = JsonData.Time(JsonData.Get(legacy, "updatedAt"));
         long limitsSequence = -1, contextSequence = -1;
         string limitsSource = null;
@@ -118,13 +121,14 @@ internal sealed class SnapshotReader
             if (snapshot == null || JsonData.Number(snapshot, "schemaVersion") != 2) continue;
             long sequence = JsonData.Number(snapshot, "sequence");
             var source = JsonData.Get(snapshot, "sessionId") as string;
+            bool sameSession = string.Equals(source, m.SessionId, StringComparison.OrdinalIgnoreCase);
             var at = JsonData.Time(JsonData.Get(snapshot, "rateLimitsAt"));
-            if (at != null && (limitsAt == null || at > limitsAt || (at == limitsAt && source == limitsSource && sequence > limitsSequence)) && at <= now.AddMinutes(2)) {
+            if ((!m.ThirdParty || sameSession) && at != null
+                && (limitsAt == null || at > limitsAt || (at == limitsAt && source == limitsSource && sequence > limitsSequence)) && at <= now.AddMinutes(2)) {
                 limitsAt = at; limitsSource = source; limitsSequence = sequence; limits = JsonData.Get(snapshot, "rateLimits");
             }
             at = JsonData.Time(JsonData.Get(snapshot, "contextAt"));
-            if (string.Equals(JsonData.Get(snapshot, "sessionId") as string, m.SessionId, StringComparison.OrdinalIgnoreCase)
-                && at != null && (contextAt == null || at > contextAt || (at == contextAt && sequence > contextSequence)) && at <= now.AddMinutes(2)) {
+            if (sameSession && at != null && (contextAt == null || at > contextAt || (at == contextAt && sequence > contextSequence)) && at <= now.AddMinutes(2)) {
                 contextAt = at; contextSequence = sequence; context = JsonData.Map(JsonData.Get(snapshot, "context"));
                 m.PluginVersion = JsonData.Get(snapshot, "pluginVersion") as string;
             }
@@ -145,7 +149,7 @@ internal sealed class SnapshotReader
 internal sealed class FileCursor : IDisposable
 {
     public string SessionId;
-    public bool IsSubagent, SkipLine;
+    public bool IsSubagent, IsThirdParty, SkipLine;
     public long Offset, PromptTokens;
     public DateTime LastActivity, LastTurnRecord, CurrentStart;
     public DateTime LastHumanPrompt, RateAt;
@@ -163,7 +167,8 @@ internal sealed class FileCursor : IDisposable
 internal sealed class Collector : IDisposable
 {
     private sealed class Counted { internal DateTime At; internal TokenUsage Usage; }
-    private readonly string _projects;
+    private readonly string _projects, _thirdPartySessions;
+    private readonly bool _watch;
     private readonly Func<DateTime> _clock;
     private readonly SnapshotReader _snapshots;
     private readonly RateSnapshots _rates;
@@ -173,45 +178,89 @@ internal sealed class Collector : IDisposable
     private readonly ConcurrentDictionary<string, byte> _changed = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _backlog = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private readonly TokenUsage _total = new TokenUsage();
-    private FileSystemWatcher _watcher;
+    private readonly List<FileSystemWatcher> _watchers = new List<FileSystemWatcher>();
     private DateTime _day, _nextScan, _nextFallback;
     private volatile bool _rescan = true;
     private bool _incomplete;
     internal int DirectoryScans { get; private set; }
     internal long BytesRead { get; private set; }
-    internal Collector(string projects, string limitsPath) : this(projects, limitsPath, () => DateTime.Now, true) { }
-    internal Collector(string projects, string limitsPath, Func<DateTime> clock, bool watch)
+    internal Collector(string projects, string limitsPath, string thirdPartySessions) : this(projects, limitsPath, () => DateTime.Now, true, thirdPartySessions) { }
+    internal Collector(string projects, string limitsPath, Func<DateTime> clock, bool watch, string thirdPartySessions = null)
     {
         _projects = Path.GetFullPath(projects).TrimEnd(Path.DirectorySeparatorChar);
+        _thirdPartySessions = thirdPartySessions == null ? null : Path.GetFullPath(thirdPartySessions).TrimEnd(Path.DirectorySeparatorChar);
+        _watch = watch;
         _clock = clock; _day = clock().Date; _snapshots = new SnapshotReader(Path.GetDirectoryName(limitsPath));
         _rates = new RateSnapshots(Path.GetDirectoryName(limitsPath));
-        if (watch && Directory.Exists(_projects)) {
-            try {
-                _watcher = new FileSystemWatcher(_projects, "*.jsonl") { IncludeSubdirectories = true, NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size };
-                _watcher.Changed += (s, e) => Changed(e.FullPath);
-                _watcher.Created += (s, e) => Changed(e.FullPath);
-                _watcher.Renamed += (s, e) => { Changed(e.FullPath); _rescan = true; };
-                _watcher.Error += (s, e) => _rescan = true;
-                _watcher.EnableRaisingEvents = true;
-            } catch (IOException) { if (_watcher != null) _watcher.Dispose(); _watcher = null; }
+    }
+    private void Watch(string path)
+    {
+        if (!_watch || !Directory.Exists(path) || _watchers.Any(w => w.Path == path)) return;
+        FileSystemWatcher watcher = null;
+        try {
+            watcher = new FileSystemWatcher(path, "*.jsonl") { IncludeSubdirectories = true, NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size };
+            watcher.Changed += (s, e) => Changed(e.FullPath);
+            watcher.Created += (s, e) => Changed(e.FullPath);
+            watcher.Renamed += (s, e) => { Changed(e.FullPath); _rescan = true; };
+            watcher.Error += (s, e) => _rescan = true;
+            watcher.EnableRaisingEvents = true;
+            _watchers.Add(watcher);
+        } catch (Exception ex) {
+            if (watcher != null) watcher.Dispose();
+            if (!(ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException)) throw;
         }
+    }
+    private bool IsThirdPartyTranscript(string path)
+    {
+        if (_thirdPartySessions == null || !path.StartsWith(_thirdPartySessions + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return false;
+        var parts = path.Substring(_thirdPartySessions.Length + 1).Split(Path.DirectorySeparatorChar);
+        return parts.Length >= 6 && string.Equals(parts[3], ".claude", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(parts[4], "projects", StringComparison.OrdinalIgnoreCase);
     }
     internal void Changed(string path)
     {
+        if (!path.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase)
+            || (!path.StartsWith(_projects + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) && !IsThirdPartyTranscript(path))) return;
         if (_changed.Count > 10000) { _rescan = true; return; }
-        if (path.StartsWith(_projects + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) && path.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase)) _changed[path] = 0;
+        _changed[path] = 0;
     }
-    private void Discover()
+    private static bool PlainDirectory(string path)
     {
-        DirectoryScans++;
-        if (!Directory.Exists(_projects)) return;
-        var stack = new Stack<string>(); stack.Push(_projects);
+        return Directory.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0;
+    }
+    private string[] Subdirectories(string path)
+    {
+        try { if (PlainDirectory(path)) return Directory.GetDirectories(path).Where(PlainDirectory).ToArray(); }
+        catch (IOException) { _incomplete = true; } catch (UnauthorizedAccessException) { _incomplete = true; }
+        return new string[0];
+    }
+    private void Discover(string projects)
+    {
+        if (!Directory.Exists(projects)) return;
+        var stack = new Stack<string>(); stack.Push(projects);
         while (stack.Count > 0) {
             var dir = stack.Pop();
             try {
                 foreach (var path in Directory.GetFiles(dir, "*.jsonl")) if (File.GetLastWriteTime(path) >= _day) Changed(path);
                 foreach (var sub in Directory.GetDirectories(dir)) if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) == 0) stack.Push(sub);
             } catch (IOException) { _incomplete = true; } catch (UnauthorizedAccessException) { _incomplete = true; }
+        }
+    }
+    private void Discover()
+    {
+        DirectoryScans++;
+        Watch(_projects); Watch(_thirdPartySessions);
+        Discover(_projects);
+        // Desktop keeps each third-party profile in three levels of opaque IDs.
+        foreach (var account in Subdirectories(_thirdPartySessions)) {
+            foreach (var organization in Subdirectories(account)) {
+                foreach (var profile in Subdirectories(organization)) {
+                    var config = Path.Combine(profile, ".claude");
+                    var projects = Path.Combine(config, "projects");
+                    try { if (PlainDirectory(config) && PlainDirectory(projects)) Discover(projects); }
+                    catch (IOException) { _incomplete = true; } catch (UnauthorizedAccessException) { _incomplete = true; }
+                }
+            }
         }
     }
     internal Metrics Poll()
@@ -230,7 +279,8 @@ internal sealed class Collector : IDisposable
                 FileCursor cursor;
                 if (!_files.TryGetValue(path, out cursor)) {
                     bool child = string.Equals(Path.GetFileName(Path.GetDirectoryName(path)), "subagents", StringComparison.OrdinalIgnoreCase);
-                    cursor = new FileCursor { IsSubagent = child, SessionId = child ? Path.GetFileName(Path.GetDirectoryName(Path.GetDirectoryName(path))) : Path.GetFileNameWithoutExtension(path) };
+                    cursor = new FileCursor { IsSubagent = child, IsThirdParty = IsThirdPartyTranscript(path),
+                        SessionId = child ? Path.GetFileName(Path.GetDirectoryName(Path.GetDirectoryName(path))) : Path.GetFileNameWithoutExtension(path) };
                     _files[path] = cursor;
                 }
                 ReadNew(path, cursor);
@@ -250,6 +300,7 @@ internal sealed class Collector : IDisposable
             if (age > 5 && active.State == "completed") m.RateState = "idle";
         }
         _rates.Apply(m, now);
+        m.ThirdParty = m.SessionId != null && _files.Values.Any(f => f.IsThirdParty && string.Equals(f.SessionId, m.SessionId, StringComparison.OrdinalIgnoreCase));
         _snapshots.Apply(m, now);
         // During a turn the strip keeps the latest valid request average; when idle it shows "--".
         if (m.Rate > 0) _heldRate = m.Rate;
@@ -335,7 +386,7 @@ internal sealed class Collector : IDisposable
         foreach (var block in content) if (Equals(JsonData.Get(JsonData.Map(block), "type"), "tool_result")) return true;
         return false;
     }
-    public void Dispose() { if (_watcher != null) _watcher.Dispose(); foreach (var f in _files.Values) f.Dispose(); }
+    public void Dispose() { foreach (var watcher in _watchers) watcher.Dispose(); foreach (var f in _files.Values) f.Dispose(); }
 }
 internal sealed class DisplaySettings
 {
@@ -361,9 +412,9 @@ internal sealed class DisplaySettings
         return new DisplaySettings();
     }
     internal void Save(string path) { JsonData.WriteAtomic(path, new { schemaVersion = 1, selected = Selected, priority = Priority, theme = Theme }); }
-    internal List<string> Fit(Func<string, double> measure, double available)
+    internal List<string> Fit(Func<string, double> measure, double available, bool showLimits = true)
     {
-        var keys = Keys.Where(Selected.Contains).ToList();
+        var keys = Keys.Where(k => Selected.Contains(k) && (showLimits || k != "limits")).ToList();
         while (keys.Count > 0 && measure(string.Join(",", keys)) > available) { var last = Priority.LastOrDefault(keys.Contains) ?? keys.Last(); keys.Remove(last); }
         return keys;
     }

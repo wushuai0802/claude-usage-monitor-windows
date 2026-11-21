@@ -123,7 +123,8 @@ internal static class MonitorUI
             row(item.Label, MetricText.Percent(item.Limit));
             if (item.Limit != null && item.Limit.ResetsAt != null && !item.Limit.Expired) panel.Children.Add(Text(item.Limit.ResetsAt.Value.ToString("MM-dd HH:mm") + " 重置", 10.5, muted));
         }
-        panel.Children.Add(Text("读数 " + MetricText.Age(m.LimitsAt, DateTime.Now) + (m.SnapshotError ? " · 部分快照不可读" : ""), 10.5, muted));
+        panel.Children.Add(Text((m.LimitSource == "vm2api" ? "vm2api · " : "读数 ") + MetricText.Age(m.LimitsAt, DateTime.Now)
+            + (m.SnapshotError ? " · 部分快照不可读" : ""), 10.5, muted));
         var footer = new DockPanel { Margin = new Thickness(0, 10, 0, 0) };
         var settingsButton = Button(showSettings ? "收起设置" : "显示设置", toggleSettings, ink); DockPanel.SetDock(settingsButton, Dock.Right); footer.Children.Add(settingsButton);
         footer.Children.Add(Text("非官方 · v" + Program.Version, 10.5, muted)); panel.Children.Add(footer);
@@ -280,10 +281,11 @@ internal sealed class OverlayController
             var text = string.Join("  |  ", keys.Split(',').Where(k => k.Length > 0).Select(k => MetricText.Value(k, m)));
             return Measure(text, a.Scale).Width;
         };
-        var shown = _settings.Fit(measure, available);
+        bool showLimits = !m.ThirdParty || m.FiveHour != null || m.SevenDay != null;
+        var shown = _settings.Fit(measure, available, showLimits);
         _shownMetrics = shown.ToArray();
         // An all-unchecked selection remains reachable for restoring preferences.
-        bool settingsOnly = _settings.Selected.Count == 0;
+        bool settingsOnly = _settings.Selected.Count == 0 || (!showLimits && _settings.Selected.All(k => k == "limits"));
         if (shown.Count == 0 && !settingsOnly) { Hide("no-room"); Report(); return; }
         var textValue = settingsOnly ? "用量设置" : string.Join("  |  ", shown.Select(k => MetricText.Value(k, m)));
         var signature = textValue + _light + a.Scale.ToString("R", CultureInfo.InvariantCulture);
@@ -323,6 +325,12 @@ internal sealed class OverlayController
         if (DateTime.UtcNow < _nextReport) return; _nextReport = DateTime.UtcNow.AddSeconds(5);
         var a = _anchor;
         try { JsonData.WriteAtomic(Path.Combine(_state, "status.json"), new { version = Program.Version, state = _reason, visible = _strip != null && _strip.IsVisible, details = _detail != null && _detail.IsVisible, owner = _owner.ToInt64(), theme = _light ? "light" : "dark", pluginVersion = _metrics == null ? null : _metrics.PluginVersion, sessionBinding = "latest-active",
+            usage = _metrics == null ? null : new { source = _metrics.SessionId == null ? null : _metrics.ThirdParty ? "desktop-third-party" : "default",
+                activityAt = _metrics.ActivityAt == null ? null : _metrics.ActivityAt.Value.ToUniversalTime().ToString("o"),
+                todayTokens = _metrics.Today.Total, contextTokens = _metrics.ContextTokens },
+            quota = _metrics == null || _metrics.LimitsAt == null ? null : new { source = _metrics.LimitSource ?? "plugin",
+                fiveHour = MetricText.Percent(_metrics.FiveHour), sevenDay = MetricText.Percent(_metrics.SevenDay),
+                at = _metrics.LimitsAt.Value.ToUniversalTime().ToString("o") },
             rate = _metrics == null ? null : new { value = _metrics.Rate, last = _metrics.LastRate, phase = _metrics.RateState, source = _metrics.RateSource,
                 sampledAt = _metrics.RateAt == null ? null : _metrics.RateAt.Value.ToUniversalTime().ToString("o"), outputTokens = _metrics.RateOutputTokens, durationMs = _metrics.RateDurationMs },
             layout = a == null ? null : new { left = a.Left, right = a.Right, available = a.Right - a.Left, scale = a.Scale,

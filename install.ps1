@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
   [string]$InstallRoot = '',
+  [string]$ClaudeCli = '',
   [switch]$SkipPlugin,
   [switch]$SkipLaunch
 )
@@ -13,7 +14,7 @@ if ($InstallRoot) {
   $OverlayExe = Join-Path $StateRoot 'bin\ClaudeUsageOverlay.exe'
 }
 if (-not $SkipPlugin) {
-  $claude = Find-ClaudeCli
+  $claude = if ($ClaudeCli) { (Resolve-Path -LiteralPath $ClaudeCli).ProviderPath } else { Find-ClaudeCli }
   if (-not $claude) { throw 'Claude Code was not found. Open the Code tab of Claude desktop once, then run this again.' }
   & $claude plugin validate (Join-Path $PSScriptRoot 'plugin\usage-monitor')
   if ($LASTEXITCODE -ne 0) { throw 'Plugin validation failed; the existing overlay is unchanged.' }
@@ -23,7 +24,8 @@ if (-not $SkipPlugin) {
 $built = "$OverlayExe.new"
 & (Join-Path $PSScriptRoot 'scripts\build.ps1') -Output $built
 if (-not $SkipPlugin) {
-  $registry = Join-Path $env:USERPROFILE '.claude\plugins\known_marketplaces.json'
+  $configRoot = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
+  $registry = Join-Path $configRoot 'plugins\known_marketplaces.json'
   $known = if (Test-Path -LiteralPath $registry) { Get-Content -LiteralPath $registry -Raw | ConvertFrom-Json } else { $null }
   if (-not $known -or $known.PSObject.Properties.Name -notcontains $MarketplaceName) {
     & $claude plugin marketplace add $PSScriptRoot

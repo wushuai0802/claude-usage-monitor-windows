@@ -105,6 +105,13 @@ internal static class OverlayLayout
 {
     internal const double ControlGapDip = 6;
     internal static bool CanPlace(double left, double right, double width) { return width > 0 && Math.Floor(right) - Math.Ceiling(left) >= width; }
+    internal static Rect ComposerRow(Rect composer, Rect input, Rect model, double scale)
+    {
+        if (composer.IsEmpty || input.IsEmpty || model.IsEmpty || !composer.Contains(input) || !composer.Contains(model)
+            || composer.Top < input.Top - 50 * scale || composer.Bottom > model.Bottom + 30 * scale
+            || model.Top < input.Bottom - 20 * scale || model.Top > input.Bottom + 100 * scale) return Rect.Empty;
+        return new Rect(composer.Left, model.Top, composer.Width, model.Height);
+    }
     internal static Rect FreeRange(Rect toolbar, Rect model, IEnumerable<Rect> occupied, double scale)
     {
         if (toolbar.IsEmpty || model.IsEmpty || toolbar.Height <= 0 || scale <= 0 || model.Left < toolbar.Left || model.Left > toolbar.Right) return Rect.Empty;
@@ -134,6 +141,7 @@ internal static class OverlayLayout
 internal sealed class AnchorFinder
 {
     private AutomationElement _root, _model, _portal, _toolbar, _edit;
+    private bool _useComposerRow;
     private readonly List<AutomationElement> _row = new List<AutomationElement>();
     private IntPtr _window;
     private DateTime _nextSearch;
@@ -156,13 +164,15 @@ internal sealed class AnchorFinder
             }
             double scale = Native.Scale(window);
             var row = _toolbar.Current.BoundingRectangle;
+            var input = _edit == null ? Rect.Empty : _edit.Current.BoundingRectangle;
+            if (_useComposerRow) row = OverlayLayout.ComposerRow(row, input, box, scale);
             row.Intersect(new Rect(frame.Left, frame.Top, frame.Width, frame.Height));
             var controls = new List<Rect>();
             foreach (var e in _row) if (!e.Current.IsOffscreen) controls.Add(e.Current.BoundingRectangle);
             var free = OverlayLayout.FreeRange(row, box, controls, scale);
             Stage = menu ? "menu-open" : free.IsEmpty ? "no-room" : "located";
             return new Anchor { Window = window, Frame = frame, Model = box, Left = free.IsEmpty ? box.Left : free.Left, Right = free.IsEmpty ? box.Left : free.Right,
-                Scale = scale, MenuOpen = menu, At = DateTime.UtcNow, Input = _edit == null ? Rect.Empty : _edit.Current.BoundingRectangle, Row = row, Controls = controls.ToArray() };
+                Scale = scale, MenuOpen = menu, At = DateTime.UtcNow, Input = input, Row = row, Controls = controls.ToArray() };
         } catch (ElementNotAvailableException) { _model = null; Invalidate(); Stage = "element-rebuilt"; return null; }
         catch (InvalidOperationException) { _model = null; Invalidate(); Stage = "uia-unavailable"; return null; }
     }
@@ -179,7 +189,7 @@ internal sealed class AnchorFinder
     }
     private void Search(IntPtr window)
     {
-        _nextSearch = DateTime.UtcNow.AddSeconds(5); _model = null; _toolbar = null; _edit = null; _row.Clear();
+        _nextSearch = DateTime.UtcNow.AddSeconds(5); _model = null; _toolbar = null; _edit = null; _useComposerRow = false; _row.Clear();
         _root = AutomationElement.FromHandle(window);
         // Cache the popup container; do not traverse the conversation tree on every tick.
         _portal = _root.FindFirst(TreeScope.Descendants, new PropertyCondition(AutomationElement.AutomationIdProperty, "portal-root"));
@@ -207,10 +217,27 @@ internal sealed class AnchorFinder
             var parent = TreeWalker.ControlViewWalker.GetParent(row); if (parent == null) break;
             var r = parent.Current.BoundingRectangle; if (r.IsEmpty || r.Height > model.Height * 2.5) break; row = parent;
         }
+        // Some composers expose only the picker group at toolbar height. Locate the
+        // compact ancestor that contains the editor and picker, then use its picker row.
+        if (_edit != null && row.Current.BoundingRectangle.Left >= model.Left - 2 * OverlayLayout.ControlGapDip * scale) {
+            var parent = row;
+            for (int depth = 0; depth < 8; depth++) {
+                parent = TreeWalker.ControlViewWalker.GetParent(parent);
+                if (parent == null) break;
+                if (!OverlayLayout.ComposerRow(parent.Current.BoundingRectangle, inputBox, model, scale).IsEmpty) {
+                    row = parent; _useComposerRow = true; break;
+                }
+            }
+        }
         _toolbar = row;
         var neighbors = row.FindAll(TreeScope.Descendants, new OrCondition(
             new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
             new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.CheckBox),
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ComboBox),
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Hyperlink),
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem),
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.RadioButton),
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.SplitButton),
             new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text)));
         foreach (AutomationElement e in neighbors) {
             var r = e.Current.BoundingRectangle;

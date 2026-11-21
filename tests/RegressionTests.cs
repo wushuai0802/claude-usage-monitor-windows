@@ -103,6 +103,53 @@ internal static class RegressionTests
                 File.WriteAllText(path, Assistant("tomorrow", now.AddSeconds(-1), 7)); File.SetLastWriteTime(path, now);
                 m = collector.Poll(); Equal("day rollover resets total", 7L, m.Today.Output);
             }
+            var profiles = Path.Combine(root, "local-agent-mode-sessions");
+            var profile = Path.Combine(profiles, "account", "organization", "profile");
+            var thirdPartyProjects = Path.Combine(profile, ".claude", "projects", "session");
+            var thirdPartyState = Path.Combine(root, "third-party-state");
+            var thirdPartyMeasurements = Path.Combine(thirdPartyState, "measurements");
+            Directory.CreateDirectory(thirdPartyProjects);
+            Directory.CreateDirectory(thirdPartyMeasurements);
+            var transcript = Path.Combine(thirdPartyProjects, "third-party.jsonl");
+            var stray = Path.Combine(profile, "diagnostics.jsonl");
+            File.WriteAllText(stray, Assistant("unrelated", now, 1000));
+            File.WriteAllText(transcript, User(now.AddSeconds(-2)) + Assistant("tomorrow", now, 80));
+            File.SetLastWriteTime(transcript, now);
+            File.WriteAllText(Path.Combine(thirdPartyMeasurements, "other.slot0.json"), Json(Snapshot("other", now, new { percent = 25, tokens = 90000 }, 82)));
+            using (var collector = new Collector(projects, Path.Combine(thirdPartyState, "limits.json"), () => now, false, profiles)) {
+                collector.Changed(stray);
+                var m = collector.Poll();
+                Equal("third-party transcript discovered in its profile", "third-party", m.SessionId);
+                Equal("third-party source retained", true, m.ThirdParty);
+                Equal("transcripts from both locations deduplicate", 80L, m.Today.Output);
+                Equal("third-party context falls back to prompt tokens", 100L, m.ContextTokens);
+                Equal("third-party rate falls back to transcript timing", 40.0, m.Rate);
+                Equal("unrelated subscription quota is not used for third-party session", null, m.FiveHour);
+                File.WriteAllText(Path.Combine(thirdPartyMeasurements, "third-party.slot0.json"), Json(Snapshot("third-party", now, new { percent = 1, tokens = 100 }, 12)));
+                now = now.AddSeconds(6);
+                m = collector.Poll();
+                Equal("matching third-party session can provide quota", 12.0, m.FiveHour.Used);
+                Equal("matching third-party session can provide context", 1.0, m.ContextPercent);
+                File.AppendAllText(transcript, User(now) + Assistant("new-third-party", now.AddSeconds(1), 13));
+                collector.Changed(transcript); now = now.AddSeconds(2);
+                Equal("third-party append is picked up without directory rescan", 93L, collector.Poll().Today.Output);
+            }
+            var reset = new DateTime(2030, 1, 1, 0, 0, 0, DateTimeKind.Utc).ToLocalTime();
+            var quotaBody = Json(new { unit = "percent_used", platform = "anthropic",
+                five_hour = new { utilization = 18.5, resets_at = "1893456000" },
+                seven_day = new { utilization = 0, resets_at = "2030-01-01T00:00:00Z" } });
+            var quota = Vm2ApiQuota.Parse(quotaBody, reset.AddMinutes(-1));
+            Equal("vm2api uses the returned percent without changing units", 18.5, quota.FiveHour.Used);
+            Equal("vm2api parses a Unix reset", reset, quota.FiveHour.ResetsAt);
+            Equal("vm2api parses an ISO reset", reset, quota.SevenDay.ResetsAt);
+            Equal("vm2api accepts a confirmed zero-percent window", 0.0, quota.SevenDay.Used);
+            Equal("vm2api never shows pre-reset usage after the reset", "已重置", MetricText.Percent(Vm2ApiQuota.CurrentWindow(quota.FiveHour, reset)));
+            Equal("vm2api rejects the other platform", null, Vm2ApiQuota.Parse(quotaBody.Replace("anthropic", "openai"), now));
+            Equal("vm2api rejects unrecognized units", null, Vm2ApiQuota.Parse(quotaBody.Replace("percent_used", "percent_remaining"), now));
+            Equal("vm2api does not invent a window", null, Vm2ApiQuota.Parse("{\"platform\":\"anthropic\",\"unit\":\"percent_used\",\"five_hour\":null}", now));
+            Equal("vm2api accepts an explicitly configured Tailnet endpoint", true, Vm2ApiQuota.BaseUrl("http://100.64.0.8:8787") != null);
+            Equal("vm2api does not send an issued key over public HTTP", null, Vm2ApiQuota.BaseUrl("http://198.51.100.1:8787"));
+            Equal("vm2api endpoint cannot carry credentials in the URL", null, Vm2ApiQuota.BaseUrl("https://test@example.invalid"));
             var ratesDir = Path.Combine(state, "rates"); Directory.CreateDirectory(ratesDir);
             var rateSlot = Path.Combine(ratesDir, "parent.slot0.json");
             var rateStart = now;
@@ -161,6 +208,8 @@ internal static class RegressionTests
             settings = new DisplaySettings();
             var fit = settings.Fit(keys => keys.Split(',').Length * 50, 100);
             Equal("narrow layout retains limits", true, fit.Contains("limits")); Equal("narrow layout retains context", true, fit.Contains("context"));
+            fit = settings.Fit(keys => keys.Split(',').Length * 50, 100, false);
+            Equal("unknown third-party quota gives its space to rate", true, fit.Contains("rate") && !fit.Contains("limits"));
             Equal("no room hides all metrics", 0, settings.Fit(keys => 50, 20).Count);
             foreach (var scale in new[] { 1.0, 1.25, 1.5, 2.0 }) {
                 var placed = OverlayLayout.Place(100 * scale, 500 * scale, 60 * scale, 200, 24, scale);
@@ -181,6 +230,15 @@ internal static class RegressionTests
             Equal("growing native label reduces the free range", 209.0, OverlayLayout.FreeRange(toolbar, modelButton, wideLabel, 1).Width);
             Equal("empty left side uses toolbar boundary", 522.0, OverlayLayout.FreeRange(toolbar, modelButton, new Rect[0], 1).Width);
             Equal("occupied toolbar has no safe space", true, OverlayLayout.FreeRange(toolbar, modelButton, new[] { new Rect(0, 0, 534, 24) }, 1).IsEmpty);
+            var thirdPartyComposer = new Rect(0, 0, 430, 80);
+            var thirdPartyInput = new Rect(10, 10, 410, 20);
+            var thirdPartyModel = new Rect(191, 42, 194, 28);
+            var thirdPartyRow = OverlayLayout.ComposerRow(thirdPartyComposer, thirdPartyInput, thirdPartyModel, 1);
+            Equal("picker-only toolbar uses the compact composer bounds", new Rect(0, 42, 430, 28), thirdPartyRow);
+            var thirdPartyGap = OverlayLayout.FreeRange(thirdPartyRow, thirdPartyModel,
+                new[] { new Rect(10, 42, 28, 28), new Rect(44, 42, 28, 28), thirdPartyModel }, 1);
+            Equal("third-party strip clears the two native buttons", new Rect(78, 42, 107, 28), thirdPartyGap);
+            Equal("whole conversation is not a composer", true, OverlayLayout.ComposerRow(new Rect(0, 0, 430, 300), thirdPartyInput, thirdPartyModel, 1).IsEmpty);
             Equal("off-row content does not steal toolbar space", free, OverlayLayout.FreeRange(toolbar, modelButton, nativeControls.Concat(new[] { new Rect(253, -40, 281, 16) }), 1));
             Equal("oversized overlay is not placed over controls", true, OverlayLayout.Place(100, 199, 0, 100, 20, 1).IsEmpty);
             Equal("fractional boundary rounding stays inside gap", true, OverlayLayout.Place(100.4, 199.8, 0, 100, 20, 1).IsEmpty);

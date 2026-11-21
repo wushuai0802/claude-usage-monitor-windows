@@ -8,7 +8,7 @@
 42.6 tok/s | 256.3万 | 93.5% | 5h 24% · 7d 38% | 上下文 26%
 ~~~
 
-不注入 Claude、不开调试端口、不修改安装包，不读取账号凭据、不发送网络请求。
+不注入 Claude、不开调试端口、不修改安装包。默认只读本地数据。vm2api 额度需要单独启用。
 
 ## 安装
 
@@ -21,6 +21,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ~~~
 
 已打开的会话要重启后才加载新插件。额度和上下文要等会话收到下一次响应后才有读数，之前显示 `--`。
+
+Claude 桌面的第三方模式（`Claude-3p`）有独立的插件目录。在 PowerShell 进程中设置 `CLAUDE_CONFIG_DIR` 为该实例实际使用的配置目录，安装脚本就会在这个目录登记插件。可通过 `-ClaudeCli` 指定桌面实例对应的 `claude.exe`。已安装的第三方会话启动时会拉起小窗。即使当前会话还没加载插件，小窗也能从第三方会话记录计算 Token、缓存命中、上下文 Token 数和估算速率。
+
+### 可选：通过 CC Switch 显示 vm2api 额度
+
+Claude Desktop 已通过 CC Switch 转发到 vm2api 时，在 `%LOCALAPPDATA%\ClaudeUsageMonitor\vm2api.json` 填入网关基址并重启小窗：
+
+~~~json
+{"baseUrl":"https://vm2api.example.com"}
+~~~
+
+基址须与 CC Switch 选中路由的基址一致。HTTPS、回环与私网/Tailnet HTTP 均可。小窗只在最近的 Claude 会话有匹配的成功代理记录时，复用该路由的 vm2api 托管 Key 请求 `GET /v1/usage?platform=claude`，每分钟至多一次。明细里标注 vm2api 和重置时间。该接口返回网关当前选中的 Claude 账户额度；同一个 Key 可以调度多个账户时，匹配的是网关所选账户，接口没有返回上次推理的账户 ID。未取得额度时状态条省略该项。移走这个配置文件并重启小窗即可关闭。
 
 ## 使用
 
@@ -43,10 +55,10 @@ tok/s 和上下文取最近活跃的主会话，不一定是正在查看的那�
 
 ## 隐私
 
-- 读取 `%USERPROFILE%\.claude\projects` 下的对话记录（JSONL）。这些文件包含对话内容，小窗只提取用量字段和时间戳，不保存也不显示内容。
+- 读取 `%USERPROFILE%\.claude\projects` 和 `%LOCALAPPDATA%\Claude-3p\local-agent-mode-sessions` 下隔离配置的 `.claude\projects` 对话记录（JSONL）。这些文件包含对话内容，小窗只提取用量字段和时间戳，不保存也不显示内容。
 - 通过 UI Automation 读取按钮名称和位置来定位。
 - 只在 `%LOCALAPPDATA%\ClaudeUsageMonitor` 保存读数、设置、状态和限长日志。
-- 没有网络请求、遥测或凭据读取。
+- 默认没有网络请求。单独开启 vm2api 后，仅向配置中匹配的网关查询额度，托管 Key 只从 CC Switch 数据库只读取得并用于当次请求，不写入小窗设置、日志或快照。没有遥测。
 
 ## 开发
 
